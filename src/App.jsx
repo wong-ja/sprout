@@ -1,0 +1,407 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+    loadState, saveState, exportData, importData,
+    isBannerDismissed, dismissBanner, genId, columnById, PALETTES,
+} from "./store.js";
+import FilterBar, { DEFAULT_FILTERS, applyFilters } from "./components/FilterBar.jsx";
+import Board from "./components/Board.jsx";
+import Table from "./components/Table.jsx";
+import JobModal from "./components/JobModal.jsx";
+import Stats from "./components/Stats.jsx";
+import Settings from "./components/Settings.jsx";
+
+const NAV = [
+    { id: "board", label: "Board" },
+    { id: "table", label: "Table" },
+    { id: "stats", label: "Stats" },
+];
+
+export default function App() {
+    const [state, setState] = useState(() => loadState());
+    const [view, setView] = useState("board");
+    const [filters, setFilters] = useState(DEFAULT_FILTERS);
+    const [modal, setModal] = useState(null); // { mode, job?, column? }
+    const [showSettings, setShowSettings] = useState(false);
+    const [bannerDismissed, setBannerDismissed] = useState(isBannerDismissed);
+    const [search, setSearch] = useState("");
+    const [importError, setImportError] = useState("");
+    const fileRef = useRef();
+
+    const { jobs, columns, palette, theme } = state;
+
+    // persist on every state change
+    useEffect(() => { saveState(state); }, [state]);
+
+    //palette + theme applied to <html>
+    useEffect(() => {
+        document.documentElement.setAttribute("data-palette", palette);
+        document.documentElement.setAttribute("data-theme", theme);
+    }, [palette, theme]);
+
+    // keyboard accessibility, esc key on modals
+    useEffect(() => {
+        const handler = (e) => {
+            if (e.key === "Escape") { setModal(null); setShowSettings(false); }
+        };
+        window.addEventListener("keydown", handler);
+        return () => window.removeEventListener("keydown", handler);
+    }, []);
+
+    const patch = (updates) => setState((s) => ({ ...s, ...updates }));
+
+    const addJob = useCallback((data) => {
+        patch({ jobs: [{ ...data, id: genId(), createdAt: Date.now() }, ...jobs] });
+        setModal(null);
+    }, [jobs]);
+
+    const updateJob = useCallback((data) => {
+        patch({ jobs: jobs.map((j) => (j.id === data.id ? { ...j, ...data } : j)) });
+        setModal(null);
+    }, [jobs]);
+
+    const deleteJob = useCallback((id) => {
+        patch({ jobs: jobs.filter((j) => j.id !== id) });
+        setModal(null);
+    }, [jobs]);
+
+    const moveJob = useCallback((id, colId) => {
+        patch({ jobs: jobs.map((j) => j.id === id ? { ...j, column: colId } : j) });
+    }, [jobs]);
+
+    const reorderJobs = useCallback((newJobs) => {
+        patch({ jobs: newJobs });
+    }, []);
+
+    const addColumn = (label) => {
+        const id = `col_${Date.now()}`;
+        patch({
+            columns: [...columns, {
+                id, label,
+                color: "var(--col-custom-dot)",
+                bg: "var(--col-custom-bg)",
+                textColor: "var(--col-custom-text)",
+                locked: false,
+            }],
+        });
+    };
+
+    const renameColumn = (id, label) => {
+        patch({ columns: columns.map((c) => c.id === id ? { ...c, label } : c) });
+    };
+
+    // delted column - jobs move back to 'watchlist'
+    const deleteColumn = (id) => {
+        patch({
+            columns: columns.filter((c) => c.id !== id),
+            jobs: jobs.map((j) => j.column === id ? { ...j, column: "watchlist" } : j),
+        });
+    };
+
+    const reorderColumns = (newColumns) => {
+        patch({ columns: newColumns });
+    };
+
+    const handleExport = () => exportData(state);
+
+    const handleImportClick = () => fileRef.current?.click();
+
+    const handleImportFile = async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setImportError("");
+        try {
+            const data = await importData(file);
+            setState((s) => ({
+                ...s,
+                jobs: data.jobs ?? s.jobs,
+                columns: data.columns ?? s.columns,
+                palette: data.palette ?? s.palette,
+                theme: data.theme ?? s.theme,
+            }));
+        } catch (err) {
+            setImportError(err.message);
+        }
+        e.target.value = "";
+    };
+
+    // combine search + filters
+    const filteredJobs = applyFilters(
+        search.trim()
+            ? jobs.filter(j =>
+                [j.company, j.role, j.location, j.industry, ...(j.tags ?? [])]
+                    .join(" ").toLowerCase()
+                    .includes(search.toLowerCase())
+                )
+            : jobs,
+        filters
+    );
+
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh", background: "var(--bg-page)" }}>
+            {/* banner - notif on data privacy & local storage */}
+            {!bannerDismissed && (
+                <div
+                    role="status"
+                    aria-live="polite"
+                    style={{
+                        background: "var(--bg-subtle)",
+                        borderBottom: "1px solid var(--border-default)",
+                        padding: "10px 24px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        fontSize: 13,
+                        color: "var(--text-secondary)",
+                    }}
+                >
+                    <span>
+                        <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>Your data stays on your device.</strong>
+                        {" "}Sprout saves to your browser's local storage — nothing is sent to any server.
+                        Export a backup anytime to keep your data safe across devices.
+                    </span>
+                    <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                        <button
+                            onClick={handleExport}
+                            style={btnStyle("outline")}
+                            aria-label="Export data backup"
+                        >
+                            Export backup
+                        </button>
+                        <button
+                            onClick={() => { setBannerDismissed(true); dismissBanner(); }}
+                            aria-label="Dismiss notice"
+                            style={{ ...btnStyle("ghost"), fontWeight: 500, fontSize: 18, padding: "2px 8px", lineHeight: 1 }}
+                        >
+                            ⓧ
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* header */}
+            <header
+                style={{
+                    background: "var(--bg-surface)",
+                    borderBottom: "1px solid var(--border-default)",
+                    padding: "0 20px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 16,
+                    height: 54,
+                    position: "sticky",
+                    top: 0,
+                    zIndex: 50,
+                }}
+            >
+                {/* logo */}
+                <div style={{ display: "flex", alignItems: "center", gap: 9, marginRight: 8 }}>
+                    <div
+                        aria-hidden="true"
+                        style={{
+                            width: 32, height: 32, borderRadius: 10,
+                            background: "var(--accent-light)",
+                            border: "1.5px solid var(--border-default)",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            flexShrink: 0,
+                        }}
+                    >
+                        <img src="/favicon2.png" alt="logo" width={15} />
+                    </div>
+                    <div>
+                        <span className="sprout-wordmark" style={{ fontSize: 17 }}>Sprout</span>
+                        <span style={{ display: "block", fontSize: 9.5, color: "var(--text-tertiary)", letterSpacing: "0.03em", lineHeight: 1, marginTop: 1, fontFamily: "var(--font-sans)" }}>
+                        </span>
+                    </div>
+                </div>
+
+                {/* Nav */}
+                <nav aria-label="Main navigation" style={{ display: "flex", gap: 2 }}>
+                    {NAV.map((n) => (
+                        <button
+                            key={n.id}
+                            onClick={() => setView(n.id)}
+                            aria-current={view === n.id ? "page" : undefined}
+                            style={{
+                                padding: "5px 12px",
+                                borderRadius: 7,
+                                border: "none",
+                                background: view === n.id ? "var(--accent-light)" : "transparent",
+                                color: view === n.id ? "var(--accent-text)" : "var(--text-secondary)",
+                                fontWeight: view === n.id ? 600 : 400,
+                                fontSize: 13,
+                                cursor: "pointer",
+                                transition: "background 0.15s, color 0.15s",
+                            }}
+                        >
+                            {n.label}
+                        </button>
+                    ))}
+                </nav>
+
+                <div style={{ flex: 1 }} />
+
+                {/* search */}
+                <div style={{ position: "relative" }}>
+                    <label htmlFor="global-search" className="sr-only">Search jobs</label>
+                    <input
+                        id="global-search"
+                        type="search"
+                        placeholder="Search…"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        style={{
+                            width: 180,
+                            padding: "6px 10px 6px 30px",
+                            borderRadius: 8,
+                            border: "1px solid var(--border-default)",
+                            background: "var(--bg-subtle)",
+                            color: "var(--text-primary)",
+                            fontSize: 13,
+                            outline: "none",
+                        }}
+                        aria-label="Search jobs by company, role, location, or tag"
+                    />
+                    <svg
+                        aria-hidden="true"
+                        width="13" height="13" viewBox="0 0 14 14" fill="none"
+                        style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", opacity: 0.4 }}
+                    >
+                        <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.5" />
+                        <line x1="9.2" y1="9.2" x2="12.5" y2="12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    </svg>
+                </div>
+
+                {/* Import/Export */}
+                <button onClick={handleImportClick} style={btnStyle("ghost")} aria-label="Import backup file">Import</button>
+                <button onClick={handleExport} style={btnStyle("ghost")} aria-label="Export data as JSON backup">Export</button>
+                <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".json"
+                    onChange={handleImportFile}
+                    style={{ display: "none" }}
+                    aria-hidden="true"
+                />
+
+                {/* settings */}
+                <button
+                    onClick={() => setShowSettings((v) => !v)}
+                    style={btnStyle("ghost")}
+                    aria-label="Open settings"
+                    aria-expanded={showSettings}
+                >
+                    Settings
+                </button>
+
+                {/* add job */}
+                <button
+                    onClick={() => setModal({ mode: "add", column: "watchlist" })}
+                    style={btnStyle("primary")}
+                    aria-label="Add a new job"
+                >
+                    + Add job
+                </button>
+            </header>
+
+            {importError && (
+                <div role="alert" style={{ background: "var(--danger-bg)", color: "var(--danger)", padding: "8px 24px", fontSize: 13 }}>
+                    Import failed: {importError}
+                    <button onClick={() => setImportError("")} style={{ marginLeft: 12, ...btnStyle("ghost") }}>Dismiss</button>
+                </div>
+            )}
+
+            {/* filters */}
+            <FilterBar
+                filters={filters}
+                onChange={setFilters}
+                columns={columns}
+                allJobs={jobs}
+            />
+
+            {/* main content -- kanban board, table view, stats dashboard */}
+            <main id="main-content" style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                {view === "board" && (
+                    <Board
+                        jobs={filteredJobs}
+                        allJobs={jobs}
+                        columns={columns}
+                        groupBy={filters.groupBy}
+                        onAddJob={(col) => setModal({ mode: "add", column: col })}
+                        onOpenJob={(job) => setModal({ mode: "view", job })}
+                        onMoveJob={moveJob}
+                        onReorderJobs={reorderJobs}
+                    />
+                )}
+                {view === "table" && (
+                    <Table
+                        jobs={filteredJobs}
+                        columns={columns}
+                        groupBy={filters.groupBy}
+                        onOpenJob={(job) => setModal({ mode: "view", job })}
+                        onAddJob={() => setModal({ mode: "add", column: "watchlist" })}
+                        onMoveJob={moveJob}
+                    />
+                )}
+                {view === "stats" && (
+                    <Stats jobs={filteredJobs} allJobs={jobs} columns={columns} hasFilters={filteredJobs.length !== jobs.length} />
+                )}
+            </main>
+
+            {/* job modal */}
+            {modal && (
+                <JobModal
+                    modal={modal}
+                    columns={columns}
+                    onClose={() => setModal(null)}
+                    onAdd={addJob}
+                    onUpdate={updateJob}
+                    onDelete={deleteJob}
+                    onMove={moveJob}
+                    onEdit={(job) => setModal({ mode: "edit", job })}
+                />
+            )}
+
+            {/* settings */}
+            {showSettings && (
+                <Settings
+                    palette={palette}
+                    theme={theme}
+                    columns={columns}
+                    onPaletteChange={(p) => patch({ palette: p })}
+                    onThemeChange={(t) => patch({ theme: t })}
+                    onAddColumn={addColumn}
+                    onRenameColumn={renameColumn}
+                    onDeleteColumn={deleteColumn}
+                    onReorderColumns={reorderColumns}
+                    onClose={() => setShowSettings(false)}
+                    onExport={handleExport}
+                    onImport={handleImportClick}
+                />
+            )}
+        </div>
+    );
+}
+
+// BUTTON STYLE
+export function btnStyle(variant = "outline") {
+    const base = {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "6px 12px",
+        borderRadius: 8,
+        fontSize: 13,
+        fontWeight: 500,
+        cursor: "pointer",
+        transition: "background 0.15s, color 0.15s, border-color 0.15s",
+        lineHeight: 1.4,
+        whiteSpace: "nowrap",
+    };
+    if (variant === "primary") return { ...base, background: "var(--accent)", color: "#fff", border: "none" };
+    if (variant === "outline") return { ...base, background: "transparent", color: "var(--text-secondary)", border: "1px solid var(--border-default)" };
+    if (variant === "ghost") return { ...base, background: "transparent", color: "var(--text-secondary)", border: "none" };
+    if (variant === "danger") return { ...base, background: "var(--danger-bg)", color: "var(--danger)", border: "1px solid var(--danger)" };
+    return base;
+}
