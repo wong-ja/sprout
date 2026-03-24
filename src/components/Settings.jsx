@@ -2,10 +2,18 @@ import { useState, useRef, useEffect } from "react";
 import { PALETTES } from "../store.js";
 import { btnStyle } from "../App.jsx";
 
+// preset colours for column dot picker
+const DOT_PRESETS = [
+    "#ef4444","#f97316","#eab308","#22c55e","#10b981",
+    "#06b6d4","#3b82f6","#6366f1","#8b5cf6","#ec4899",
+    "#94a3b8","#78716c","#1d4ed8","#065f46","#9d174d",
+];
+
 export default function Settings({
     palette, theme, columns,
     onPaletteChange, onThemeChange,
     onAddColumn, onRenameColumn, onDeleteColumn, onReorderColumns,
+    onUpdateColumnColor,
     onClose, onExport, onImport,
 }) {
     const panelRef = useRef();
@@ -104,7 +112,7 @@ export default function Settings({
                                     aria-pressed={palette === p.id}
                                     aria-label={`${p.label} palette - ${p.description}${palette === p.id ? ", selected" : ""}`}
                                     style={{
-                                        padding: "10px 10px",
+                                        padding: "10px",
                                         borderRadius: 10,
                                         border: `2px solid ${palette === p.id ? p.swatch : "var(--border-default)"}`,
                                         background: palette === p.id ? "var(--bg-subtle)" : "transparent",
@@ -131,30 +139,32 @@ export default function Settings({
                         </div>
                     </Section>
 
-                    {/* CUSTOM ? */}
+                    {/* COLUMNS */}
                     <Section title="Columns">
-                        <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 12px" }}>
-                            Add custom columns to your board. Default columns can be renamed but not deleted.
+                        <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 12px", lineHeight: 1.5 }}>
+                            Drag to reorder columns. Click the colour dot to change it. Default columns can be renamed but not deleted.
                         </p>
                         <ColumnManager
                             columns={columns}
                             onAdd={onAddColumn}
                             onRename={onRenameColumn}
                             onDelete={onDeleteColumn}
+                            onReorder={onReorderColumns}
+                            onUpdateColor={onUpdateColumnColor}
                         />
                     </Section>
 
                     {/* DATA: IMPORT/EXPORT */}
                     <Section title="Your data">
                         <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 12px", lineHeight: 1.6 }}>
-                            All your data is stored locally in your browser. Export a JSON backup to keep it safe.
+                            All your data is stored locally in your browser. Export a JSON backup to keep it safe across devices.
                             Re-import at any time to restore everything.
                         </p>
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                            <button onClick={onExport} style={btnStyle("outline")} aria-label="Download data backup as JSON">
+                            <button onClick={onExport} style={btnStyle("outline")} aria-label="Export data backup">
                                 Export backup
                             </button>
-                            <button onClick={onImport} style={btnStyle("outline")} aria-label="Import data from backup file">
+                            <button onClick={onImport} style={btnStyle("outline")} aria-label="Import data from backup">
                                 Import backup
                             </button>
                         </div>
@@ -164,7 +174,7 @@ export default function Settings({
                     <Section title="About Sprout">
                         <p style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1.7, margin: 0 }}>
                             Sprout is a private, local-first job and application tracking board.
-                            No account required. Your data never leaves your device unless you choose to export it.
+                            No account required. Your data never leaves your device.
                             Built for everyone - any role, any industry, any stage of your journey.
                         </p>
                     </Section>
@@ -187,21 +197,35 @@ function Section({ title, children }) {
 }
 
 
-function ColumnManager({ columns, onAdd, onRename, onDelete }) {
-    const [newLabel, setNewLabel] = useState("");
+function ColumnManager({ columns, onAdd, onRename, onDelete, onReorder, onUpdateColor }) {
+    const [newLabel, setNewLabel]   = useState("");
     const [editingId, setEditingId] = useState(null);
     const [editLabel, setEditLabel] = useState("");
+    const [colorPickId, setColorPickId] = useState(null);
+    const [dragOver, setDragOver]   = useState(null);
+    const [dragId, setDragId]       = useState(null);
 
-    const startEdit = (col) => { setEditingId(col.id); setEditLabel(col.label); };
-    const saveEdit = () => {
-        if (editLabel.trim()) onRename(editingId, editLabel.trim());
-        setEditingId(null);
-    };
+    const startEdit = col => { setEditingId(col.id); setEditLabel(col.label); };
+    const saveEdit  = () => { if (editLabel.trim()) onRename(editingId, editLabel.trim()); setEditingId(null); };
+    const addCol    = () => { const t = newLabel.trim(); if (t) { onAdd(t); setNewLabel(""); } };
 
-    const addCol = () => {
-        const trimmed = newLabel.trim();
-        if (trimmed) { onAdd(trimmed); setNewLabel(""); }
+    // simple drag-reorder within the list
+    const handleDragStart = (e, id) => { setDragId(id); e.dataTransfer.effectAllowed = "move"; };
+    const handleDragOver  = (e, id) => { e.preventDefault(); setDragOver(id); };
+    const handleDrop      = (e, id) => {
+        e.preventDefault();
+        if (!dragId || dragId === id) { setDragId(null); setDragOver(null); return; }
+        const from = columns.findIndex(c => c.id === dragId);
+        const to   = columns.findIndex(c => c.id === id);
+        if (from !== -1 && to !== -1) {
+            const next = [...columns];
+            const [moved] = next.splice(from, 1);
+            next.splice(to, 0, moved);
+            onReorder(next);
+        }
+        setDragId(null); setDragOver(null);
     };
+    const handleDragEnd = () => { setDragId(null); setDragOver(null); };
 
     return (
         <div>
@@ -209,15 +233,57 @@ function ColumnManager({ columns, onAdd, onRename, onDelete }) {
                 {columns.map((col) => (
                     <li
                         key={col.id}
+                        draggable
+                        onDragStart={e => handleDragStart(e, col.id)}
+                        onDragOver={e => handleDragOver(e, col.id)}
+                        onDrop={e => handleDrop(e, col.id)}
+                        onDragEnd={handleDragEnd}
                         style={{
                             display: "flex", alignItems: "center", gap: 8,
                             padding: "8px 10px",
-                            background: "var(--bg-subtle)",
+                            background: dragOver === col.id ? "var(--accent-light)" : "var(--bg-subtle)",
                             borderRadius: 8,
-                            border: "1px solid var(--border-subtle)",
+                            border: `1px solid ${dragOver === col.id ? "var(--accent)" : "var(--border-subtle)"}`,
+                            cursor: "grab", transition: "background 0.1s, border-color 0.1s",
+                            opacity: dragId === col.id ? 0.4 : 1,
                         }}
                     >
-                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: col.color, flexShrink: 0 }} aria-hidden="true" />
+                        {/* drag handle */}
+                        <span aria-hidden="true" style={{ color: "var(--text-tertiary)", fontSize: 12, cursor: "grab", userSelect: "none", flexShrink: 0 }}>⠿</span>
+
+                        {/* color picker */}
+                        <div style={{ position: "relative", flexShrink: 0 }}>
+                            <button
+                                onClick={() => setColorPickId(colorPickId === col.id ? null : col.id)}
+                                aria-label={`Change colour for ${col.label} column`}
+                                title="Change column colour"
+                                style={{ width: 14, height: 14, borderRadius: "50%", background: col.color, border: "2px solid var(--border-default)", cursor: "pointer", padding: 0, flexShrink: 0 }}
+                            />
+                            {colorPickId === col.id && (
+                                <div style={{ position: "absolute", top: 20, left: 0, zIndex: 300, background: "var(--bg-raised)", border: "1px solid var(--border-default)", borderRadius: 10, boxShadow: "var(--shadow-lg)", padding: 10, display: "flex", flexWrap: "wrap", gap: 6, width: 168 }}>
+                                    {DOT_PRESETS.map(hex => (
+                                        <button
+                                            key={hex}
+                                            onClick={() => { onUpdateColor(col.id, hex); setColorPickId(null); }}
+                                            aria-label={`Set colour ${hex}`}
+                                            style={{ width: 20, height: 20, borderRadius: "50%", background: hex, border: col.color === hex ? "3px solid var(--text-primary)" : "2px solid transparent", cursor: "pointer", padding: 0, transition: "transform 0.1s" }}
+                                            onMouseEnter={e => e.currentTarget.style.transform = "scale(1.2)"}
+                                            onMouseLeave={e => e.currentTarget.style.transform = "scale(1)"}
+                                        />
+                                    ))}
+                                    {/* custom hex input */}
+                                    <input
+                                        type="color"
+                                        defaultValue={col.color?.startsWith("#") ? col.color : "#8b5cf6"}
+                                        onChange={e => onUpdateColor(col.id, e.target.value)}
+                                        aria-label="Custom colour"
+                                        title="Custom colour"
+                                        style={{ width: 20, height: 20, borderRadius: "50%", border: "none", padding: 0, cursor: "pointer", background: "none" }}
+                                    />
+                                </div>
+                            )}
+                        </div>
+
                         {editingId === col.id ? (
                             <>
                                 <input
@@ -228,33 +294,16 @@ function ColumnManager({ columns, onAdd, onRename, onDelete }) {
                                     aria-label={`Rename column ${col.label}`}
                                     style={{ flex: 1, fontSize: 13, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--bg-surface)", color: "var(--text-primary)", outline: "none" }}
                                 />
-                                <button onClick={saveEdit} style={{ ...btnStyle("primary"), padding: "4px 10px", fontSize: 12 }} aria-label="Save column name">Save</button>
-                                <button onClick={() => setEditingId(null)} style={{ ...btnStyle("ghost"), padding: "4px 8px", fontSize: 12 }} aria-label="Cancel rename">Cancel</button>
+                                <button onClick={saveEdit} style={{ ...btnStyle("primary"), padding: "4px 10px", fontSize: 12 }}>Save</button>
+                                <button onClick={() => setEditingId(null)} style={{ ...btnStyle("ghost"), padding: "4px 8px", fontSize: 12 }}>Cancel</button>
                             </>
                         ) : (
                             <>
                                 <span style={{ flex: 1, fontSize: 13, color: "var(--text-primary)", fontWeight: 500 }}>{col.label}</span>
-                                <button
-                                    onClick={() => startEdit(col)}
-                                    style={{ ...btnStyle("ghost"), padding: "3px 8px", fontSize: 11 }}
-                                    aria-label={`Rename ${col.label} column`}
-                                >
-                                    Rename
-                                </button>
-                                {!col.locked && (
-                                    <button
-                                        onClick={() => {
-                                            if (window.confirm(`Delete "${col.label}"? Jobs in this column will move to Watchlist.`)) {
-                                                onDelete(col.id);
-                                            }
-                                        }}
-                                        style={{ ...btnStyle("ghost"), padding: "3px 8px", fontSize: 11, color: "var(--danger)" }}
-                                        aria-label={`Delete ${col.label} column`}
-                                    >
-                                        Delete
-                                    </button>
-                                )}
-                                {col.locked && (
+                                <button onClick={() => startEdit(col)} style={{ ...btnStyle("ghost"), padding: "3px 8px", fontSize: 11 }} aria-label={`Rename ${col.label}`}>Rename</button>
+                                {!col.locked ? (
+                                    <button onClick={() => { if (window.confirm(`Delete "${col.label}"? Jobs will move to Watchlist.`)) onDelete(col.id); }} style={{ ...btnStyle("ghost"), padding: "3px 8px", fontSize: 11, color: "var(--danger)" }} aria-label={`Delete ${col.label}`}>Delete</button>
+                                ) : (
                                     <span style={{ fontSize: 10, color: "var(--text-tertiary)", padding: "3px 6px" }}>default</span>
                                 )}
                             </>
@@ -277,7 +326,7 @@ function ColumnManager({ columns, onAdd, onRename, onDelete }) {
                     onClick={addCol}
                     disabled={!newLabel.trim()}
                     style={{ ...btnStyle("primary"), opacity: newLabel.trim() ? 1 : 0.5 }}
-                    aria-label="Add new column"
+                    aria-label="Add column"
                 >
                     Add
                 </button>

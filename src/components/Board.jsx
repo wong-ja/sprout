@@ -1,14 +1,15 @@
 import { useState } from "react";
 import {
     DndContext, DragOverlay, PointerSensor, KeyboardSensor,
-    useSensor, useSensors, closestCorners,
+    useSensor, useSensors, pointerWithin, rectIntersection,
+    closestCenter,
 } from "@dnd-kit/core";
 import {
     SortableContext, verticalListSortingStrategy,
-    useSortable, arrayMove,
+    useSortable, arrayMove, horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { getInitials, fmtDateShort, INTERVIEW_STAGES } from "../store.js";
+import { getInitials, fmtDateShort } from "../store.js";
 import { groupJobs } from "./FilterBar.jsx";
 
 
@@ -24,9 +25,28 @@ const STAGE_COLORS = {
     "Reference Check": { bg: "#f0f9ff", color: "#0369a1", dot: "#0ea5e9" },
 };
 
+// hex → rgba helper for column tint backgrounds
+function hexToRgba(hex, alpha) {
+    if (!hex || hex.startsWith("var(")) return `rgba(128,128,128,${alpha})`;
+    const h = hex.replace("#", "");
+    const r = parseInt(h.slice(0,2), 16);
+    const g = parseInt(h.slice(2,4), 16);
+    const b = parseInt(h.slice(4,6), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// custom collision: prefer column droppables over card droppables
+function customCollision(args) {
+    const pointerHits = pointerWithin(args);
+    if (pointerHits.length) return pointerHits;
+    return rectIntersection(args);
+}
+
 // ============= KANBAN BOARD ====================================================================
-export default function Board({ jobs, columns, groupBy, onAddJob, onOpenJob, onMoveJob, onReorderJobs, allJobs }) {
-    const [activeJob, setActiveJob] = useState(null);
+export default function Board({ jobs, columns, groupBy, onAddJob, onOpenJob, onMoveJob, onReorderJobs, onReorderColumns, allJobs }) {
+    const [activeJob, setActiveJob]       = useState(null);
+    const [activeColId, setActiveColId]   = useState(null); // for column drag
+    const [dragType, setDragType]         = useState(null); // "job" | "column"
 
     const sensors = useSensors(
         useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -40,233 +60,331 @@ export default function Board({ jobs, columns, groupBy, onAddJob, onOpenJob, onM
         : groupJobs(jobs, groupBy, columns);
 
     const handleDragStart = ({ active }) => {
-        setActiveJob(allJobs.find((j) => j.id === active.id) ?? null);
+        // Detect whether we're dragging a column or a job
+        if (columns.find(c => c.id === active.id)) {
+            setDragType("column");
+            setActiveColId(active.id);
+        } else {
+            setDragType("job");
+            setActiveJob(allJobs.find(j => j.id === active.id) ?? null);
+        }
     };
 
     const handleDragEnd = ({ active, over }) => {
+        const type = dragType;
         setActiveJob(null);
-        if (!over || !isStatusGrouped) return;
-        const activeJob = allJobs.find((j) => j.id === active.id);
-        if (!activeJob) return;
-        if (columns.find((c) => c.id === over.id)) {
-            if (activeJob.column !== over.id) onMoveJob(activeJob.id, over.id);
+        setActiveColId(null);
+        setDragType(null);
+
+        if (!over) return;
+
+        // COLUMN REORDER
+        if (type === "column") {
+            const oldIdx = columns.findIndex(c => c.id === active.id);
+            const newIdx = columns.findIndex(c => c.id === over.id);
+            if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
+                onReorderColumns(arrayMove(columns, oldIdx, newIdx));
+            }
             return;
         }
-        const overJob = allJobs.find((j) => j.id === over.id);
+
+        // DRAGGING JOB CARDS
+        if (!isStatusGrouped) return;
+
+        const draggedJob = allJobs.find(j => j.id === active.id);
+        if (!draggedJob) return;
+
+        // Dropped onto a column droppable zone
+        const overCol = columns.find(c => c.id === over.id);
+        if (overCol) {
+            if (draggedJob.column !== overCol.id) onMoveJob(draggedJob.id, overCol.id);
+            return;
+        }
+
+        const overJob = allJobs.find(j => j.id === over.id);
         if (!overJob) return;
-        if (activeJob.column !== overJob.column) {
-            onMoveJob(activeJob.id, overJob.column);
+
+        if (draggedJob.column !== overJob.column) {
+            // cross-column move
+            onMoveJob(draggedJob.id, overJob.column);
         } else {
-            const colJobs = allJobs.filter((j) => j.column === activeJob.column);
-            const oldIdx = colJobs.findIndex((j) => j.id === activeJob.id);
-            const newIdx = colJobs.findIndex((j) => j.id === overJob.id);
+            // same-column reorder
+            const colJobs = allJobs.filter(j => j.column === draggedJob.column);
+            const oldIdx  = colJobs.findIndex(j => j.id === draggedJob.id);
+            const newIdx  = colJobs.findIndex(j => j.id === overJob.id);
             if (oldIdx !== newIdx) {
                 const reordered = arrayMove(colJobs, oldIdx, newIdx);
-                onReorderJobs([...allJobs.filter((j) => j.column !== activeJob.column), ...reordered]);
+                onReorderJobs([...allJobs.filter(j => j.column !== draggedJob.column), ...reordered]);
             }
         }
     };
 
+    const handleDragCancel = () => {
+        setActiveJob(null);
+        setActiveColId(null);
+        setDragType(null);
+    };
+
+    const overlayJob = activeJob;
+    const overlayCol = activeColId ? columns.find(c => c.id === activeColId) : null;
+
     return (
         <DndContext
             sensors={sensors}
-            collisionDetection={closestCorners}
+            collisionDetection={customCollision}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
+            onDragCancel={handleDragCancel}
         >
-            <div
-                role="region"
-                aria-label="Job tracking board"
-                style={{
-                    display: "flex",
-                    gap: 12,
-                    padding: "16px 20px 24px",
-                    overflowX: "auto",
-                    flex: 1,
-                    alignItems: "flex-start",
-                }}
+            {/* sortable columns for reordering */}
+            <SortableContext
+                items={columns.map(c => c.id)}
+                strategy={horizontalListSortingStrategy}
             >
+                <div
+                    role="region"
+                    aria-label="Job tracking board"
+                    style={{
+                        display: "flex",
+                        gap: 12,
+                        padding: "16px 20px 24px",
+                        overflowX: "auto",
+                        flex: 1,
+                        alignItems: "flex-start",
+                    }}
+                >
                 {/* empty state */}
-                {jobs.length === 0 && (
-                    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-tertiary)", fontSize: 14, padding: 40 }}>
-                        No jobs match the current filters.
-                    </div>
-                )}
+                    {jobs.length === 0 && (
+                        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-tertiary)", fontSize: 14, padding: 40 }}>
+                            No jobs match the current filters.
+                        </div>
+                    )}
 
-                {groups.map((group) => {
-                    const col = group.col ?? columns.find(c => c.id === "watchlist");
-                    return (
-                        <Column
-                            key={group.key}
-                            col={col ?? { id: group.key, label: group.label, color: "var(--accent)", bg: "var(--accent-light)", textColor: "var(--accent-text)" }}
-                            label={group.label}
-                            jobs={group.jobs}
-                            allCount={isStatusGrouped ? allJobs.filter(j => j.column === group.key).length : group.jobs.length}
-                            onAddJob={isStatusGrouped ? () => onAddJob(group.key) : null}
-                            onOpenJob={onOpenJob}
-                            isDndEnabled={isStatusGrouped}
-                        />
-                    );
-                })}
-            </div>
+                    {groups.map((group) => {
+                        const col = group.col ?? columns.find(c => c.id === "watchlist");
+                        const fallbackCol = col ?? { id: group.key, label: group.label, color: "var(--accent)", bg: "var(--accent-light)", textColor: "var(--accent-text)" };
+                        return (
+                            <SortableColumn
+                                key={group.key}
+                                col={fallbackCol}
+                                label={group.label}
+                                jobs={group.jobs}
+                                allCount={isStatusGrouped ? allJobs.filter(j => j.column === group.key).length : group.jobs.length}
+                                onAddJob={isStatusGrouped ? () => onAddJob(group.key) : null}
+                                onOpenJob={onOpenJob}
+                                isDndEnabled={isStatusGrouped}
+                                allColumns={columns}
+                                groupBy={groupBy}
+                                isDraggingColumn={activeColId === group.key}
+                            />
+                        );
+                    })}
+                </div>
+            </SortableContext>
 
-            <DragOverlay>
-                {activeJob ? (
+            <DragOverlay dropAnimation={{ duration: 180, easing: "ease" }}>
+                {overlayJob ? (
                     <JobCard
-                        job={activeJob}
-                        col={columns.find((c) => c.id === activeJob.column)}
+                        job={overlayJob}
+                        col={columns.find(c => c.id === overlayJob.column)}
                         onOpen={() => {}}
                         isOverlay
                     />
+                ) : overlayCol ? (
+                    <ColumnShell col={overlayCol} isOverlay />
                 ) : null}
             </DragOverlay>
         </DndContext>
     );
 }
 
+// sortable column wrapper (for column reordering)
+function SortableColumn({ col, ...props }) {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: col.id });
+    return (
+        <div
+            ref={setNodeRef}
+            style={{
+                transform: CSS.Transform.toString(transform),
+                transition,
+                opacity: isDragging ? 0.35 : 1,
+                zIndex: isDragging ? 10 : "auto",
+            }}
+        >
+            <Column col={col} {...props} dragHandleProps={{ ...attributes, ...listeners }} />
+        </div>
+    );
+}
+
+// placeholder shown in DragOverlay when dragging a column
+function ColumnShell({ col, isOverlay }) {
+    return (
+        <div style={{
+            minWidth: 240, width: 260,
+            background: "var(--bg-surface)",
+            border: `2px solid ${col.color ?? "var(--accent)"}`,
+            borderRadius: 12, height: 120,
+            opacity: 0.8,
+            boxShadow: "var(--shadow-lg)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)" }}>{col.label}</span>
+        </div>
+    );
+}
+
 // ============== COLUMN GROUPS ======================================================
-function Column({ col, label, jobs, allCount, onAddJob, onOpenJob, isDndEnabled }) {
+function Column({ col, label, jobs, allCount, onAddJob, onOpenJob, isDndEnabled, allColumns, groupBy, dragHandleProps, isDraggingColumn }) {
+    const tintBg   = col.color ? hexToRgba(col.color, 0.06) : "var(--bg-surface)";
+    const tintBorder = col.color ? hexToRgba(col.color, 0.22) : "var(--border-default)";
+
     return (
         <section
-            aria-label={`${col.label} column, ${allCount} jobs`}
+            aria-label={`${label ?? col.label} column, ${allCount} jobs`}
             style={{
-                    minWidth: 240,
-                    width: 260,
-                    flexShrink: 0,
-                    background: "var(--bg-surface)",
-                    border: "1px solid var(--border-default)",
-                    borderRadius: 12,
-                    display: "flex",
-                    flexDirection: "column",
-                    maxHeight: "calc(100vh - 120px)",
+                minWidth: 240,
+                width: 260,
+                flexShrink: 0,
+                background: tintBg,
+                border: `1px solid ${tintBorder}`,
+                borderRadius: 12,
+                display: "flex",
+                flexDirection: "column",
+                maxHeight: "calc(100vh - 160px)",
             }}
         >
             {/* columns header */}
             <div
                 style={{
-                    padding: "12px 12px 8px",
+                    padding: "10px 12px 8px",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "space-between",
-                    borderBottom: "1px solid var(--border-subtle)",
+                    borderBottom: `1px solid ${tintBorder}`,
+                    cursor: isDndEnabled ? "grab" : "default",
+                    userSelect: "none",
                 }}
+                {...(isDndEnabled ? dragHandleProps : {})}
+                title={isDndEnabled ? "Drag to reorder column" : undefined}
             >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div
                         aria-hidden="true"
                         style={{ width: 8, height: 8, borderRadius: "50%", background: col.color, flexShrink: 0 }}
                     />
-                        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{label ?? col.label}</span>
-                        <span
-                            aria-label={`${allCount} jobs`}
-                            style={{
-                                fontSize: 11,
-                                color: "var(--text-tertiary)",
-                                background: "var(--bg-subtle)",
-                                borderRadius: 10,
-                                padding: "1px 7px",
-                                border: "1px solid var(--border-subtle)",
-                                fontWeight: 500,
-                            }}
-                        >
-                            {allCount}
-                        </span>
-                    </div>
-                    {onAddJob && (
-                        <button
-                            onClick={onAddJob}
-                            aria-label={`Add job to ${label ?? col.label}`}
-                            style={{
-                                    width: 24, height: 24, borderRadius: 6,
-                                    border: "1px solid var(--border-default)",
-                                    background: "transparent",
-                                    color: "var(--text-tertiary)",
-                                    cursor: "pointer", fontSize: 16,
-                                    display: "flex", alignItems: "center", justifyContent: "center",
-                                    lineHeight: 1, transition: "background 0.1s",
-                            }}
-                            onMouseEnter={(e) => e.currentTarget.style.background = "var(--bg-hover)"}
-                            onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
-                        >+</button>
-                    )}
+                    <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{label ?? col.label}</span>
+                    <span
+                        aria-label={`${allCount} jobs`}
+                        style={{
+                            fontSize: 11, color: "var(--text-tertiary)",
+                            background: "var(--bg-surface)", borderRadius: 10,
+                            padding: "1px 7px", border: "1px solid var(--border-subtle)", fontWeight: 500,
+                        }}
+                    >
+                        {allCount}
+                    </span>
                 </div>
+                {onAddJob && (
+                    <button
+                        onClick={e => { e.stopPropagation(); onAddJob(); }}
+                        aria-label={`Add job to ${label ?? col.label}`}
+                        style={{
+                            width: 24, height: 24, borderRadius: 6,
+                            border: "1px solid var(--border-default)",
+                            background: "transparent", color: "var(--text-tertiary)",
+                            cursor: "pointer", fontSize: 16,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            lineHeight: 1, transition: "background 0.1s",
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background = "var(--bg-hover)"}
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                    >+</button>
+                )}
+            </div>
 
                 {/* kanban cards */}
-                <div
-                    style={{
-                        padding: "8px",
-                        flex: 1,
-                        overflowY: "auto",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 8,
-                    }}
-                >
-                <SortableContext items={jobs.map((j) => j.id)} strategy={verticalListSortingStrategy}>
-                    {jobs.map((job) => (
-                        <SortableCard key={job.id} job={job} col={col} onOpen={onOpenJob} />
+            <div
+                id={`col-drop-${col.id}`}
+                data-col-id={col.id}
+                style={{
+                    padding: "8px",
+                    flex: 1,
+                    overflowY: "auto",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    minHeight: 80,
+                }}
+            >
+                <SortableContext items={jobs.map(j => j.id)} strategy={verticalListSortingStrategy}>
+                    {jobs.map(job => (
+                        <SortableCard
+                            key={job.id}
+                            job={job}
+                            col={col}
+                            onOpen={onOpenJob}
+                            allColumns={allColumns}
+                            groupBy={groupBy}
+                        />
                     ))}
                 </SortableContext>
 
-                {jobs.length === 0 && (
-                    <button
-                        onClick={onAddJob}
-                        aria-label={`Add first job to ${col.label}`}
-                        style={{
-                            border: "2px dashed var(--border-default)",
-                            borderRadius: 10,
-                            padding: "20px 12px",
-                            textAlign: "center",
-                            color: "var(--text-tertiary)",
-                            fontSize: 12,
-                            cursor: "pointer",
-                            background: "transparent",
-                            width: "100%",
-                            transition: "border-color 0.15s, color 0.15s",
-                        }}
-                        onMouseEnter={(e) => {
-                            e.currentTarget.style.borderColor = "var(--border-strong)";
-                            e.currentTarget.style.color = "var(--text-secondary)";
-                        }}
-                        onMouseLeave={(e) => {
-                            e.currentTarget.style.borderColor = "var(--border-default)";
-                            e.currentTarget.style.color = "var(--text-tertiary)";
-                        }}
-                    >
-                        Add a job
-                    </button>
-                )}
+                <ColumnDropZone colId={col.id} isEmpty={jobs.length === 0} onAddJob={onAddJob} colLabel={label ?? col.label} />
             </div>
         </section>
     );
 }
 
-function SortableCard({ job, col, onOpen }) {
+function ColumnDropZone({ colId, isEmpty, onAddJob, colLabel }) {
+    const { setNodeRef, isOver } = useSortable({ id: colId, disabled: true });
+    return isEmpty ? (
+        <button
+            onClick={onAddJob}
+            aria-label={`Add first job to ${colLabel}`}
+            style={{
+                border: "2px dashed var(--border-default)",
+                borderRadius: 10, padding: "20px 12px",
+                textAlign: "center", color: "var(--text-tertiary)",
+                fontSize: 12, cursor: "pointer",
+                background: "transparent", width: "100%",
+                transition: "border-color 0.15s, color 0.15s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--border-strong)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border-default)"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+        >
+            Add a job
+        </button>
+    ) : null;
+}
+
+function SortableCard({ job, col, onOpen, allColumns, groupBy }) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: job.id });
     return (
         <div
             ref={setNodeRef}
-            style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1 }}
+            style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.35 : 1 }}
             {...attributes}
             {...listeners}
         >
-            <JobCard job={job} col={col} onOpen={onOpen} />
+            <JobCard job={job} col={col} onOpen={onOpen} allColumns={allColumns} groupBy={groupBy} />
         </div>
     );
 }
 
 // ======== KANBAN CARDS =========================================================================
-function JobCard({ job, col, onOpen, isOverlay = false }) {
-    const stage = job.column === "interviewing" && job.interviewStage ? job.interviewStage : null;
+function JobCard({ job, col, onOpen, isOverlay = false, allColumns = [], groupBy }) {
+    const stage      = job.column === "interviewing" && job.interviewStage ? job.interviewStage : null;
     const stageStyle = stage ? (STAGE_COLORS[stage] ?? STAGE_COLORS["Phone Screen"]) : null;
-    const initials = getInitials(job.company);
+    const initials   = getInitials(job.company);
+    const showStatusBadge = groupBy && groupBy !== "status" && groupBy !== "none";
+    const jobCol = allColumns.find(c => c.id === job.column);
 
     return (
         <article
             role="button"
             tabIndex={0}
             onClick={() => onOpen(job)}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(job); } }}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(job); } }}
             aria-label={`${job.company}, ${job.role}${job.location ? `, ${job.location}` : ""}. Press Enter to view details.`}
             style={{
                 background: "var(--bg-raised)",
@@ -279,20 +397,10 @@ function JobCard({ job, col, onOpen, isOverlay = false }) {
                 transition: "border-color 0.12s, box-shadow 0.12s",
                 outline: "none",
             }}
-            onMouseEnter={(e) => {
-                if (!isOverlay) {
-                    e.currentTarget.style.borderColor = "var(--border-strong)";
-                    e.currentTarget.style.boxShadow = "var(--shadow-md)";
-                }
-            }}
-            onMouseLeave={(e) => {
-                if (!isOverlay) {
-                    e.currentTarget.style.borderColor = "var(--border-default)";
-                    e.currentTarget.style.boxShadow = "var(--shadow-sm)";
-                }
-            }}
-            onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
-            onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border-default)"; }}
+            onMouseEnter={e => { if (!isOverlay) { e.currentTarget.style.borderColor = "var(--border-strong)"; e.currentTarget.style.boxShadow = "var(--shadow-md)"; } }}
+            onMouseLeave={e => { if (!isOverlay) { e.currentTarget.style.borderColor = "var(--border-default)"; e.currentTarget.style.boxShadow = "var(--shadow-sm)"; } }}
+            onFocus={e => { e.currentTarget.style.borderColor = "var(--accent)"; }}
+            onBlur={e => { e.currentTarget.style.borderColor = "var(--border-default)"; }}
         >
 
             {/* top row */}
@@ -320,17 +428,24 @@ function JobCard({ job, col, onOpen, isOverlay = false }) {
                 </div>
             </div>
 
+            {showStatusBadge && jobCol && (
+                <div style={{ marginBottom: 5 }}>
+                    <span style={{
+                        display: "inline-flex", alignItems: "center", gap: 4,
+                        fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 99,
+                        background: jobCol.bg, color: jobCol.textColor ?? jobCol.color,
+                    }}>
+                        <span style={{ width: 5, height: 5, borderRadius: "50%", background: jobCol.color, display: "inline-block" }} aria-hidden="true" />
+                        {jobCol.label}
+                    </span>
+                </div>
+            )}
+
             {/* meta info */}
             <div style={{ display: "flex", flexWrap: "wrap", gap: "3px 8px", marginBottom: 5 }}>
-                {job.location && (
-                    <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{job.location}</span>
-                )}
-                {job.workMode && (
-                    <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{job.workMode}</span>
-                )}
-                {job.salary && (
-                    <span style={{ fontSize: 11, color: "var(--text-secondary)", fontWeight: 500 }}>{job.salary}</span>
-                )}
+                {job.location && <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{job.location}</span>}
+                {job.workMode && <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{job.workMode}</span>}
+                {job.salary   && <span style={{ fontSize: 11, color: "var(--text-secondary)", fontWeight: 500 }}>{job.salary}</span>}
             </div>
 
             {/* interview sub-stage badge */}
@@ -339,10 +454,8 @@ function JobCard({ job, col, onOpen, isOverlay = false }) {
                     <span
                         style={{
                             display: "inline-flex", alignItems: "center", gap: 4,
-                            fontSize: 10, fontWeight: 600, padding: "2px 8px",
-                            borderRadius: 99,
-                            background: stageStyle.bg,
-                            color: stageStyle.color,
+                            fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 99,
+                            background: stageStyle.bg, color: stageStyle.color,
                         }}
                         aria-label={`Interview stage: ${stage}`}
                     >
@@ -355,19 +468,8 @@ function JobCard({ job, col, onOpen, isOverlay = false }) {
             {/* requirements chips */}
             {job.requirements?.length > 0 && (
                 <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 5 }} aria-label="Required documents">
-                    {job.requirements.slice(0, 3).map((r) => (
-                        <span
-                            key={r}
-                            title={r}
-                            style={{
-                                fontSize: 9, padding: "2px 6px",
-                                borderRadius: 4,
-                                background: "var(--bg-subtle)",
-                                color: "var(--text-tertiary)",
-                                border: "1px solid var(--border-subtle)",
-                                maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                            }}
-                        >
+                    {job.requirements.slice(0, 3).map(r => (
+                        <span key={r} title={r} style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-tertiary)", border: "1px solid var(--border-subtle)", maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {r.split("/")[0].trim()}
                         </span>
                     ))}
@@ -382,7 +484,7 @@ function JobCard({ job, col, onOpen, isOverlay = false }) {
             {/* tags */}
             {job.tags?.length > 0 && (
                 <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 4 }}>
-                    {job.tags.slice(0, 3).map((t) => (
+                    {job.tags.slice(0, 3).map(t => (
                         <span key={t} style={{ fontSize: 10, padding: "2px 7px", borderRadius: 99, background: "var(--accent-light)", color: "var(--accent-text)", fontWeight: 500 }}>
                             {t}
                         </span>

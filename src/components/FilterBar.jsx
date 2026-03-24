@@ -550,8 +550,11 @@ const chipBase = {
 };
 
 const selectStyle = {
-    fontSize: 12, padding: "4px 8px",
-    borderRadius: 8, border: "1px solid var(--border-default)",
-    background: "var(--bg-subtle)", color: "var(--text-primary)",
-    cursor: "pointer", outline: "none", fontFamily: "inherit",
+    fontSize: 12, padding: "5px 9px",
+    borderRadius: 8,
+    border: "1.5px solid var(--border-strong)",
+    background: "var(--bg-raised)",
+    color: "var(--text-primary)",
+    cursor: "pointer", outline: "none",
+    fontFamily: "inherit", fontWeight: 500,
 };

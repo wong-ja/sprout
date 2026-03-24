@@ -37,15 +37,15 @@ export const APPLICATION_REQUIREMENTS = [
 
 // ============ PALETTE PRESETS from Coolers ===============================================
 export const PALETTES = [
-    { id: "ocean-breeze",      label: "Lake",      swatch: "#4c82f5" },
-    { id: "golden-meadow",     label: "Harvest",     swatch: "#dd911e" },
-    { id: "terra-harvest",     label: "Clay",     swatch: "#c2452d" },
-    { id: "peach-sorbet",      label: "Sorbet",      swatch: "#f23c8e" },
-    { id: "pastel-dream",      label: "Violet",      swatch: "#906df7" },
-    { id: "enchanted-forest",  label: "Emerald",  swatch: "#00bc7d" },
-    { id: "tropical-sunrise",  label: "Tropical",  swatch: "#f74444" },
-    { id: "slate",             label: "Slate",             swatch: "#3a506e" },
-    { id: "hc",                label: "High Contrast",     swatch: "#000000", description: "Accessibility (WCAG AAA)"    },
+    { id: "lake",        label: "Lake",           swatch: "#4c82f5" },
+    { id: "harvest",     label: "Harvest",        swatch: "#dd911e" },
+    { id: "clay",        label: "Clay",           swatch: "#c2452d" },
+    { id: "sorbet",      label: "Sorbet",         swatch: "#f23c8e" },
+    { id: "violet",      label: "Violet",         swatch: "#906df7" },
+    { id: "emerald",     label: "Emerald",        swatch: "#00bc7d" },
+    { id: "tropical",    label: "Tropical",       swatch: "#f74444" },
+    { id: "slate",       label: "Slate",          swatch: "#3a506e" },
+    { id: "hc",          label: "High Contrast",  swatch: "#000000", description: "Accessibility (WCAG AAA)" },
 ];
 
 
@@ -176,7 +176,7 @@ export function loadState() {
     return {
         jobs: SAMPLE_JOBS,
         columns: DEFAULT_COLUMNS,
-        palette: "golden-meadow",
+        palette: "harvest",
         theme: "light",
         view: "board",
     };

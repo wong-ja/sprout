@@ -3,7 +3,7 @@ import {
     loadState, saveState, exportData, importData,
     isBannerDismissed, dismissBanner, genId, columnById, PALETTES,
 } from "./store.js";
-import FilterBar, { DEFAULT_FILTERS, applyFilters } from "./components/FilterBar.jsx";
+import FilterBar, { DEFAULT_FILTERS, applyFilters, activeFilterCount } from "./components/FilterBar.jsx";
 import Board from "./components/Board.jsx";
 import Table from "./components/Table.jsx";
 import JobModal from "./components/JobModal.jsx";
@@ -17,15 +17,18 @@ const NAV = [
 ];
 
 export default function App() {
-    const [state, setState] = useState(() => loadState());
-    const [view, setView] = useState("board");
-    const [filters, setFilters] = useState(DEFAULT_FILTERS);
-    const [modal, setModal] = useState(null); // { mode, job?, column? }
+    const [state, setState]               = useState(() => loadState());
+    const [view, setView]                 = useState("board");
+    const [filters, setFilters]           = useState(DEFAULT_FILTERS);
+    const [modal, setModal]               = useState(null);
     const [showSettings, setShowSettings] = useState(false);
+    const [showAddCol, setShowAddCol]     = useState(false);
+    const [newColLabel, setNewColLabel]   = useState("");
     const [bannerDismissed, setBannerDismissed] = useState(isBannerDismissed);
-    const [search, setSearch] = useState("");
-    const [importError, setImportError] = useState("");
-    const fileRef = useRef();
+    const [search, setSearch]             = useState("");
+    const [importError, setImportError]   = useState("");
+    const fileRef    = useRef();
+    const addColRef  = useRef();
 
     const { jobs, columns, palette, theme } = state;
 
@@ -40,126 +43,96 @@ export default function App() {
 
     // keyboard accessibility, esc key on modals
     useEffect(() => {
-        const handler = (e) => {
-            if (e.key === "Escape") { setModal(null); setShowSettings(false); }
+        const handler = e => {
+            if (e.key === "Escape") { setModal(null); setShowSettings(false); setShowAddCol(false); }
         };
         window.addEventListener("keydown", handler);
         return () => window.removeEventListener("keydown", handler);
     }, []);
 
-    const patch = (updates) => setState((s) => ({ ...s, ...updates }));
+    useEffect(() => {
+        if (!showAddCol) return;
+        const handler = e => { if (addColRef.current && !addColRef.current.contains(e.target)) setShowAddCol(false); };
+        document.addEventListener("mousedown", handler);
+        return () => document.removeEventListener("mousedown", handler);
+    }, [showAddCol]);
 
-    const addJob = useCallback((data) => {
+    const patch = updates => setState(s => ({ ...s, ...updates }));
+
+    const addJob = useCallback(data => {
         patch({ jobs: [{ ...data, id: genId(), createdAt: Date.now() }, ...jobs] });
         setModal(null);
     }, [jobs]);
-
-    const updateJob = useCallback((data) => {
-        patch({ jobs: jobs.map((j) => (j.id === data.id ? { ...j, ...data } : j)) });
+    const updateJob = useCallback(data => {
+        patch({ jobs: jobs.map(j => j.id === data.id ? { ...j, ...data } : j) });
         setModal(null);
     }, [jobs]);
-
-    const deleteJob = useCallback((id) => {
-        patch({ jobs: jobs.filter((j) => j.id !== id) });
+    const deleteJob = useCallback(id => {
+        patch({ jobs: jobs.filter(j => j.id !== id) });
         setModal(null);
     }, [jobs]);
-
     const moveJob = useCallback((id, colId) => {
-        patch({ jobs: jobs.map((j) => j.id === id ? { ...j, column: colId } : j) });
+        patch({ jobs: jobs.map(j => j.id === id ? { ...j, column: colId } : j) });
     }, [jobs]);
+    const reorderJobs = useCallback(newJobs => { patch({ jobs: newJobs }); }, []);
 
-    const reorderJobs = useCallback((newJobs) => {
-        patch({ jobs: newJobs });
-    }, []);
-
-    const addColumn = (label) => {
+    const addColumn = label => {
         const id = `col_${Date.now()}`;
         patch({
             columns: [...columns, {
                 id, label,
-                color: "var(--col-custom-dot)",
+                color: "#8b5cf6",
                 bg: "var(--col-custom-bg)",
                 textColor: "var(--col-custom-text)",
                 locked: false,
             }],
         });
     };
-
-    const renameColumn = (id, label) => {
-        patch({ columns: columns.map((c) => c.id === id ? { ...c, label } : c) });
-    };
-
+    const renameColumn   = (id, label) => patch({ columns: columns.map(c => c.id === id ? { ...c, label } : c) });
     // delted column - jobs move back to 'watchlist'
-    const deleteColumn = (id) => {
-        patch({
-            columns: columns.filter((c) => c.id !== id),
-            jobs: jobs.map((j) => j.column === id ? { ...j, column: "watchlist" } : j),
-        });
-    };
+    const deleteColumn   = id => patch({ columns: columns.filter(c => c.id !== id), jobs: jobs.map(j => j.column === id ? { ...j, column: "watchlist" } : j) });
+    const reorderColumns = newCols => patch({ columns: newCols });
+    const updateColumnColor = (id, color) => patch({ columns: columns.map(c => c.id === id ? { ...c, color } : c) });
 
-    const reorderColumns = (newColumns) => {
-        patch({ columns: newColumns });
-    };
-
-    const handleExport = () => exportData(state);
-
+    const handleExport      = () => exportData(state);
     const handleImportClick = () => fileRef.current?.click();
-
-    const handleImportFile = async (e) => {
+    const handleImportFile  = async e => {
         const file = e.target.files?.[0];
         if (!file) return;
         setImportError("");
         try {
             const data = await importData(file);
-            setState((s) => ({
-                ...s,
-                jobs: data.jobs ?? s.jobs,
-                columns: data.columns ?? s.columns,
-                palette: data.palette ?? s.palette,
-                theme: data.theme ?? s.theme,
-            }));
-        } catch (err) {
-            setImportError(err.message);
-        }
+            setState(s => ({ ...s, jobs: data.jobs ?? s.jobs, columns: data.columns ?? s.columns, palette: data.palette ?? s.palette, theme: data.theme ?? s.theme }));
+        } catch (err) { setImportError(err.message); }
         e.target.value = "";
     };
 
     // combine search + filters
     const filteredJobs = applyFilters(
         search.trim()
-            ? jobs.filter(j =>
-                [j.company, j.role, j.location, j.industry, ...(j.tags ?? [])]
-                    .join(" ").toLowerCase()
-                    .includes(search.toLowerCase())
-                )
+            ? jobs.filter(j => [j.company, j.role, j.location, j.industry, ...(j.tags ?? [])].join(" ").toLowerCase().includes(search.toLowerCase()))
             : jobs,
         filters
     );
 
+    // QUICK STATS
+    const totalTracked = jobs.length;
+    const activeCount  = jobs.filter(j => !["rejected", "watchlist"].includes(j.column)).length;
+    const filterCount  = activeFilterCount(filters);
+
+    const submitAddCol = () => {
+        const trimmed = newColLabel.trim();
+        if (trimmed) { addColumn(trimmed); setNewColLabel(""); setShowAddCol(false); }
+    };
 
     return (
         <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh", background: "var(--bg-page)" }}>
             {/* banner - notif on data privacy & local storage */}
             {!bannerDismissed && (
-                <div
-                    role="status"
-                    aria-live="polite"
-                    style={{
-                        background: "var(--bg-subtle)",
-                        borderBottom: "1px solid var(--border-default)",
-                        padding: "10px 24px",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 12,
-                        fontSize: 13,
-                        color: "var(--text-secondary)",
-                    }}
-                >
+                <div role="status" aria-live="polite" style={{ background: "var(--bg-subtle)", borderBottom: "1px solid var(--border-default)", padding: "10px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, fontSize: 13, color: "var(--text-secondary)" }}>
                     <span>
                         <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>Your data stays on your device.</strong>
-                        {" "}Sprout saves to your browser's local storage — nothing is sent to any server.
-                        Export a backup anytime to keep your data safe across devices.
+                        {" "}Sprout saves to your browser's local storage — nothing is sent to any server. Export a backup anytime to keep your data safe.
                     </span>
                     <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                         <button
@@ -211,8 +184,6 @@ export default function App() {
                     </div>
                     <div>
                         <span className="sprout-wordmark" style={{ fontSize: 17 }}>Sprout</span>
-                        <span style={{ display: "block", fontSize: 9.5, color: "var(--text-tertiary)", letterSpacing: "0.03em", lineHeight: 1, marginTop: 1, fontFamily: "var(--font-sans)" }}>
-                        </span>
                     </div>
                 </div>
 
@@ -241,6 +212,13 @@ export default function App() {
                 </nav>
 
                 <div style={{ flex: 1 }} />
+
+                {/* STATS */}
+                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", width: "100%", gap: 6 }} aria-label="dashboard stats">
+                    <StatPill label="Tracked" value={totalTracked} />
+                    <StatPill label="Active" value={activeCount} accent />
+                    {filterCount > 0 && <StatPill label="Filtered" value={filteredJobs.length} muted />}
+                </div>
 
                 {/* search */}
                 <div style={{ position: "relative" }}>
@@ -275,7 +253,7 @@ export default function App() {
 
                 {/* Import/Export */}
                 <button onClick={handleImportClick} style={btnStyle("ghost")} aria-label="Import backup file">Import</button>
-                <button onClick={handleExport} style={btnStyle("ghost")} aria-label="Export data as JSON backup">Export</button>
+                <button onClick={handleExport} style={btnStyle("ghost")} aria-label="Export backup">Export</button>
                 <input
                     ref={fileRef}
                     type="file"
@@ -284,24 +262,52 @@ export default function App() {
                     style={{ display: "none" }}
                     aria-hidden="true"
                 />
-
-                {/* settings */}
-                <button
-                    onClick={() => setShowSettings((v) => !v)}
-                    style={btnStyle("ghost")}
-                    aria-label="Open settings"
-                    aria-expanded={showSettings}
-                >
-                    Settings
-                </button>
-
+                    {/* settings */}
+                    <button
+                        onClick={() => setShowSettings((v) => !v)}
+                        style={btnStyle("ghost")}
+                        aria-label="Open settings"
+                        aria-expanded={showSettings}
+                    >
+                        Settings
+                    </button>
+                <div ref={addColRef} style={{ position: "relative" }}>
+                    {/* add column */}
+                    <button
+                        onClick={() => setShowAddCol(v => !v)}
+                        aria-label="Add new column"
+                        aria-expanded={showAddCol}
+                        title="Add column"
+                        style={{ ...btnStyle("outline"), padding: "6px 10px", fontSize: 13 }}
+                    >
+                        + Add Col
+                    </button>
+                    {showAddCol && (
+                        <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, zIndex: 200, background: "var(--bg-raised)", border: "1px solid var(--border-default)", borderRadius: 12, boxShadow: "var(--shadow-lg)", padding: 12, minWidth: 220, display: "flex", flexDirection: "column", gap: 8 }}>
+                            <p style={{ margin: 0, fontSize: 11, fontWeight: 700, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.05em" }}>New column</p>
+                            <input
+                                autoFocus
+                                value={newColLabel}
+                                onChange={e => setNewColLabel(e.target.value)}
+                                onKeyDown={e => { if (e.key === "Enter") submitAddCol(); if (e.key === "Escape") setShowAddCol(false); }}
+                                placeholder="Column name…"
+                                aria-label="New column name"
+                                style={{ fontSize: 13, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--border-default)", background: "var(--bg-subtle)", color: "var(--text-primary)", outline: "none" }}
+                            />
+                            <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                                <button onClick={() => setShowAddCol(false)} style={{ ...btnStyle("ghost"), fontSize: 12 }}>Cancel</button>
+                                <button onClick={submitAddCol} disabled={!newColLabel.trim()} style={{ ...btnStyle("primary"), fontSize: 12, opacity: newColLabel.trim() ? 1 : 0.5 }}>Add</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
                 {/* add job */}
                 <button
                     onClick={() => setModal({ mode: "add", column: "watchlist" })}
                     style={btnStyle("primary")}
                     aria-label="Add a new job"
                 >
-                    + Add job
+                    + Add Job
                 </button>
             </header>
 
@@ -332,6 +338,7 @@ export default function App() {
                         onOpenJob={(job) => setModal({ mode: "view", job })}
                         onMoveJob={moveJob}
                         onReorderJobs={reorderJobs}
+                        onReorderColumns={reorderColumns}
                     />
                 )}
                 {view === "table" && (
@@ -384,6 +391,17 @@ export default function App() {
     );
 }
 
+// STATS
+function StatPill({ label, value, accent, muted }) {
+    const valueColor = accent ? "var(--accent-text)" : "var(--text-primary)";
+    return (
+        <div style={{display: "inline-flex", justifyContent: "center", alignItems: "baseline", gap: 5, fontSize: 12, lineHeight: "1", whiteSpace: "nowrap", }}>
+            <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>{label}</span>
+            <span style={{ color: valueColor, fontWeight: 700 }}>{value}</span>
+        </div>
+    );
+}
+
 // BUTTON STYLE
 export function btnStyle(variant = "outline") {
     const base = {
@@ -401,7 +419,7 @@ export function btnStyle(variant = "outline") {
     };
     if (variant === "primary") return { ...base, background: "var(--accent)", color: "#fff", border: "none" };
     if (variant === "outline") return { ...base, background: "transparent", color: "var(--text-secondary)", border: "1px solid var(--border-default)" };
-    if (variant === "ghost") return { ...base, background: "transparent", color: "var(--text-secondary)", border: "none" };
-    if (variant === "danger") return { ...base, background: "var(--danger-bg)", color: "var(--danger)", border: "1px solid var(--danger)" };
+    if (variant === "ghost")   return { ...base, background: "transparent", color: "var(--text-secondary)", border: "none" };
+    if (variant === "danger")  return { ...base, background: "var(--danger-bg)", color: "var(--danger)", border: "1px solid var(--danger)" };
     return base;
 }
