@@ -511,7 +511,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAutofill(); } }}
                         />
                         <p style={{ margin: "4px 0 8px", fontSize: 11, color: "var(--text-tertiary)" }}>
-                            Requires a Gemini API key (free). If the site blocks fetching, paste the description instead.
+                            Requires a Gemini API key (free). Some sites block fetching data--paste or fill-in the description instead.
                         </p>
                     </>
                 )}
