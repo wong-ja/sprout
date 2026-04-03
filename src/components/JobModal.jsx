@@ -5,63 +5,75 @@ import {
 } from "../store.js";
 import { btnStyle } from "../App.jsx";
 
-// ======== AI AUTOFILL PROMPT - GEMINI ==========================================================
-const EXTRACT_PROMPT = `You are a job listing parser. Extract the following fields from the job posting text below.
-Return ONLY valid JSON with these exact keys (empty string if unknown):
-company, role, location, workMode, jobType, industry, salary, description, requirements (array, only include values from: Resume / CV, Cover Letter, Portfolio, References, Writing Sample, Work Sample, Assessment / Test, Transcript, Background Check, Video Introduction, LinkedIn Profile, GitHub Profile, Personal Website), tags (array of 3-5 short relevant keywords).
+// ================== HELPER FUNCTIONS =================================================
+function cleanPastedText(raw) {
+        const DROP = [
+                /equal opportunity employer/i,
+                /eeo statement/i,
+                /without regard to race|color|religion|sex|national origin/i,
+                /affirmative action/i,
+                /we do not discriminate/i,
+                /reasonable accommodat/i,
+                /disability.{0,30}veteran/i,
+                /privacy policy/i,
+                /cookie policy/i,
+                /terms of (use|service)/i,
+                /all rights reserved/i,
+                /copyright ©?\s*\d{4}/i,
+                /drug.free workplace/i,
+                /background check(s)? (may|will) be/i,
+                /compensation (may|will) vary/i,
+        ];
+        const lines = raw
+                .split("\n")
+                .map(l => l.trim())
+                .filter(l => l.length > 8)
+                .filter(l => !DROP.some(re => re.test(l)));
+        return lines.join("\n").slice(0, 5000);
+}
 
-Job posting:
----
-{TEXT}
----
+async function callProxy(body) {
+        const res = await fetch("/api/autofill", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+        });
+        let data;
+        try { data = await res.json(); }
+        catch { throw new Error("Server returned an unreadable response. Please try again."); }
+        if (!res.ok) throw new Error(data?.error ?? `Server error ${res.status}`);
+        return data;
+}
 
-Respond with JSON only. No markdown fences, no explanation.`;
+async function fetchUrlViaJina(url) {
+        const data = await callProxy({ mode: "fetch-url", url });
+        return data.text ?? "";
+}
 
-// Gemini 2.0 Flash (free tier, optional key from user input)
-async function extractWithGemini(text, apiKey) {
-    const prompt = EXTRACT_PROMPT.replace("{TEXT}", text.slice(0, 8000));
-    const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
-            }),
-        }
-    );
-    if (!res.ok) throw new Error(`Gemini API error ${res.status}`);
-    const data = await res.json();
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    const clean = raw.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
+async function extractWithGemini(text, userApiKey) {
+        const data = await callProxy({ mode: "extract", text, userApiKey });
+        const raw     = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+        const clean = raw.replace(/```json|```/g, "").trim();
+        return JSON.parse(clean);
 }
 
 // parse pasted text locally (no API needed), basic heuristics
 function extractFromPaste(text) {
-    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-
+    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
     // COMPANY: look for "at Company" or "About Company" patterns
     const companyMatch = text.match(/(?:at|@|About|Company:?)\s+([A-Z][A-Za-z0-9\s&.,'-]{1,40})/);
-    const company = companyMatch?.[1]?.trim() ?? "";
-
     // ROLE: first line that looks like a job title
     const rolePatterns = /\b(Engineer|Designer|Manager|Director|Analyst|Coordinator|Developer|Specialist|Lead|Officer|Associate|Consultant|Advisor|Writer|Editor|Nurse|Teacher|Therapist|Architect|Scientist|Producer|Recruiter|Assistant|Administrator|Representative|Technician)\b/i;
-    const roleCandidate = lines.find((l) => rolePatterns.test(l) && l.length < 80);
-
-    // SALARY: look for $ or £ with numbers
+    const roleCandidate = lines.find(l => rolePatterns.test(l) && l.length < 80);
+    // SALARY: look for $ / € / £ with numbers
     const salaryMatch = text.match(/[\$£€][\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i);
-
     // LOCATION
-    const locationMatch = text.match(/(?:Location|Based in|Office)[:.]?\s*([A-Z][A-Za-z\s,]+(?:,\s*[A-Z]{2})?)/);
-
+const locationMatch = text.match(/(?:Location|Based in|Office)[:.]?\s*([A-Z][A-Za-z\s,]+(?:,\s*[A-Z]{2})?)/);
     // WORK MODE
     const workMode =
         /\bremote\b/i.test(text) ? "Remote" :
         /\bhybrid\b/i.test(text) ? "Hybrid" :
         /\bon.?site\b|\bin.?office\b/i.test(text) ? "On-site" : "";
-
     // JOB TYPE
     const jobType =
         /\bfull.?time\b/i.test(text) ? "Full-time" :
@@ -69,25 +81,24 @@ function extractFromPaste(text) {
         /\bcontract\b/i.test(text) ? "Contract" :
         /\bfreelance\b/i.test(text) ? "Freelance" :
         /\binternship\b/i.test(text) ? "Internship" : "";
-
     // APPLICATION REQUIREMENTS (not job/role requirements)
     const reqMap = {
-        "Resume / CV":      /\bresume\b|\bcv\b|\bcurriculum vitae\b/i,
-        "Cover Letter":     /\bcover letter\b/i,
-        "Portfolio":        /\bportfolio\b/i,
-        "References":       /\breferences?\b/i,
-        "Writing Sample":   /\bwriting sample\b/i,
-        "Work Sample":      /\bwork sample\b/i,
-        "Assessment / Test":/\bassessment\b|\btest\b|\btake.?home\b/i,
-        "Transcript":       /\btranscript\b/i,
-        "Background Check": /\bbackground check\b/i,
+        "Resume / CV":             /\bresume\b|\bcv\b|\bcurriculum vitae\b/i,
+        "Cover Letter":            /\bcover letter\b/i,
+        "Portfolio":                 /\bportfolio\b/i,
+        "References":                /\breferences?\b/i,
+        "Writing Sample":        /\bwriting sample\b/i,
+        "Work Sample":             /\bwork sample\b/i,
+        "Assessment / Test": /\bassessment\b|\btest\b|\btake.?home\b/i,
+        "Transcript":                /\btranscript\b/i,
+        "Background Check":    /\bbackground check\b/i,
     };
     const requirements = Object.entries(reqMap)
         .filter(([, re]) => re.test(text))
         .map(([label]) => label);
 
-    return {
-        company,
+        return {
+        company: companyMatch?.[1]?.trim() ?? "",
         role: roleCandidate ?? "",
         location: locationMatch?.[1]?.trim() ?? "",
         workMode,
@@ -415,29 +426,24 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                 // always available - local heuristic parse
                 if (!autofillText.trim()) throw new Error("Please paste the job description first.");
                 if (geminiKey.trim()) {
-                // use Gemini if key is available for better results
-                    extracted = await extractWithGemini(autofillText, geminiKey.trim());
+                    // clean first, then send to Gemini for better results
+                    const cleaned = cleanPastedText(autofillText);
+                    extracted = await extractWithGemini(cleaned, geminiKey.trim());
                 } else {
                     extracted = extractFromPaste(autofillText);
                 }
             } else {
                 // URL mode - requires Gemini key (can't fetch arbitrary URLs from browser)
-                if (!geminiKey.trim()) throw new Error("A Gemini API key is needed to autofill from a URL. Paste the job description instead, or add your key below.");
                 if (!autofillUrl.trim()) throw new Error("Please enter a URL.");
-                // fetch page text via a CORS proxy then extract
-                const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(autofillUrl.trim())}`;
-                const res = await fetch(proxyUrl);
-                if (!res.ok) throw new Error("Couldn't fetch that URL. Try pasting the description instead.");
-                const json = await res.json();
-                // strip HTML tags for cleaner text
-                const text = json.contents?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() ?? "";
-                extracted = await extractWithGemini(text, geminiKey.trim());
+                if (!geminiKey.trim()) throw new Error("A Gemini API key is needed to autofill from a URL. Paste the job description instead, or add your key below.");
+                const pageText = await fetchUrlViaJina(autofillUrl.trim());
+                extracted = await extractWithGemini(pageText, geminiKey.trim());
             }
 
             // save key for next time
             if (geminiKey.trim()) localStorage.setItem("sprout_gemini_key", geminiKey.trim());
 
-            setForm((f) => ({
+            setForm(f => ({
                 ...f,
                 url: autofillMode === "url" ? autofillUrl.trim() : f.url,
                 company:      extracted.company      || f.company,
@@ -661,13 +667,13 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                     })}
                 </div>
                     {/* (CUSTOM) requirement write-in */}
-                    <WriteIn
-                        placeholder="Add custom requirement…"
-                        onAdd={(val) => {
-                            if (val && !(form.requirements ?? []).includes(val))
-                                set("requirements", [...(form.requirements ?? []), val]);
-                        }}
-                    />
+                <WriteIn
+                    placeholder="Add custom requirement…"
+                    onAdd={(val) => {
+                        if (val && !(form.requirements ?? []).includes(val))
+                            set("requirements", [...(form.requirements ?? []), val]);
+                    }}
+                />
             </section>
 
             {/* (OPTIONAL) JOB CONTACT DETAILS */}

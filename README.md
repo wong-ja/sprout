@@ -30,7 +30,8 @@ A private, local-first job tracking board. No account required. Your data never 
 - @dnd-kit/core 6
 - localStorage + JSON export
 - Vercel
-- Gemini LLM - (optional) AI autofill feature
+- Jina Reader - URL & job data fetching (r.jina.ai)
+- Gemini LLM - AI autofill feature (optional; input user API key)
 
 ---
 
@@ -88,6 +89,8 @@ sprout/
 ├── vercel.json
 ├── .env
 ├── index.html
+├── api/
+    ├── autofill.js 
 └── src/
     ├── main.jsx 
     ├── App.jsx 
