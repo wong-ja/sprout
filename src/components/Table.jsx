@@ -1,6 +1,5 @@
 import { useState } from "react";
-import { fmtDateShort, columnById } from "../store.js";
-import { groupJobs } from "./FilterBar.jsx";
+import { fmtDateShort, columnById, groupJobs } from "../store.js";
 
 const COLS = [
     { key: "company",    label: "Company",    width: 140 },

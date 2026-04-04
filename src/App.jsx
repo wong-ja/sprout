@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
     loadState, saveState, exportData, importData,
     isBannerDismissed, dismissBanner, genId, columnById, PALETTES,
+    DEFAULT_FILTERS, applyFilters, activeFilterCount, btnStyle,
 } from "./store.js";
-import FilterBar, { DEFAULT_FILTERS, applyFilters, activeFilterCount } from "./components/FilterBar.jsx";
+import FilterBar from "./components/FilterBar.jsx";
 import Board from "./components/Board.jsx";
 import Table from "./components/Table.jsx";
 import JobModal from "./components/JobModal.jsx";
@@ -161,7 +162,7 @@ export default function App() {
                     padding: "0 20px",
                     display: "flex",
                     alignItems: "center",
-                    gap: 16,
+                    gap: 12,
                     height: 54,
                     position: "sticky",
                     top: 0,
@@ -169,7 +170,7 @@ export default function App() {
                 }}
             >
                 {/* logo */}
-                <div style={{ display: "flex", alignItems: "center", gap: 9, marginRight: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, marginRight: 4 }}>
                     <div
                         aria-hidden="true"
                         style={{
@@ -214,10 +215,11 @@ export default function App() {
                 <div style={{ flex: 1 }} />
 
                 {/* STATS */}
-                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", width: "100%", gap: 6 }} aria-label="dashboard stats">
-                    <StatPill label="Tracked" value={totalTracked} />
-                    <StatPill label="Active" value={activeCount} accent />
-                    {filterCount > 0 && <StatPill label="Filtered" value={filteredJobs.length} muted />}
+                <div style={{ display: "flex", justifyContent: "center", width: "100%" }}>
+                    <span style={{ fontSize: 12, color: "var(--text-tertiary)", whiteSpace: "nowrap" }} aria-label={`${totalTracked} tracked, ${activeCount} active`}>
+                        {totalTracked} tracked · {activeCount} active
+                        {filterCount > 0 && <span style={{ color: "var(--accent-text)" }}> · {filteredJobs.length} shown</span>}
+                    </span>
                 </div>
 
                 {/* search */}
@@ -226,11 +228,11 @@ export default function App() {
                     <input
                         id="global-search"
                         type="search"
-                        placeholder="Search…"
+                        placeholder="Search..."
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         style={{
-                            width: 180,
+                            width: 350,
                             padding: "6px 10px 6px 30px",
                             borderRadius: 8,
                             border: "1px solid var(--border-default)",
@@ -243,8 +245,8 @@ export default function App() {
                     />
                     <svg
                         aria-hidden="true"
-                        width="13" height="13" viewBox="0 0 14 14" fill="none"
-                        style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", opacity: 0.4 }}
+                        width="12" height="12" viewBox="0 0 14 14" fill="none"
+                        style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", opacity: 0.4 }}
                     >
                         <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.5" />
                         <line x1="9.2" y1="9.2" x2="12.5" y2="12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -263,14 +265,18 @@ export default function App() {
                     aria-hidden="true"
                 />
                     {/* settings */}
-                    <button
-                        onClick={() => setShowSettings((v) => !v)}
-                        style={btnStyle("ghost")}
-                        aria-label="Open settings"
-                        aria-expanded={showSettings}
-                    >
-                        Settings
-                    </button>
+                <button
+                    onClick={() => setShowSettings(v => !v)}
+                    style={btnStyle("ghost")}
+                    aria-label="Open settings"
+                    aria-expanded={showSettings}
+                >
+                    Settings
+                </button>
+
+                <button onClick={() => setShowSettings(v => !v)} style={btnStyle("ghost")} aria-label="Open settings" aria-expanded={showSettings}>Settings</button>
+
+                {/* Quick add column */}
                 <div ref={addColRef} style={{ position: "relative" }}>
                     {/* add column */}
                     <button
@@ -290,7 +296,7 @@ export default function App() {
                                 value={newColLabel}
                                 onChange={e => setNewColLabel(e.target.value)}
                                 onKeyDown={e => { if (e.key === "Enter") submitAddCol(); if (e.key === "Escape") setShowAddCol(false); }}
-                                placeholder="Column name…"
+                                placeholder="Column name..."
                                 aria-label="New column name"
                                 style={{ fontSize: 13, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--border-default)", background: "var(--bg-subtle)", color: "var(--text-primary)", outline: "none" }}
                             />
@@ -334,8 +340,8 @@ export default function App() {
                         allJobs={jobs}
                         columns={columns}
                         groupBy={filters.groupBy}
-                        onAddJob={(col) => setModal({ mode: "add", column: col })}
-                        onOpenJob={(job) => setModal({ mode: "view", job })}
+                        onAddJob={col => setModal({ mode: "add", column: col })}
+                        onOpenJob={job => setModal({ mode: "view", job })}
                         onMoveJob={moveJob}
                         onReorderJobs={reorderJobs}
                         onReorderColumns={reorderColumns}
@@ -366,7 +372,7 @@ export default function App() {
                     onUpdate={updateJob}
                     onDelete={deleteJob}
                     onMove={moveJob}
-                    onEdit={(job) => setModal({ mode: "edit", job })}
+                    onEdit={job => setModal({ mode: "edit", job })}
                 />
             )}
 
@@ -403,23 +409,23 @@ function StatPill({ label, value, accent, muted }) {
 }
 
 // BUTTON STYLE
-export function btnStyle(variant = "outline") {
-    const base = {
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        padding: "6px 12px",
-        borderRadius: 8,
-        fontSize: 13,
-        fontWeight: 500,
-        cursor: "pointer",
-        transition: "background 0.15s, color 0.15s, border-color 0.15s",
-        lineHeight: 1.4,
-        whiteSpace: "nowrap",
-    };
-    if (variant === "primary") return { ...base, background: "var(--accent)", color: "#fff", border: "none" };
-    if (variant === "outline") return { ...base, background: "transparent", color: "var(--text-secondary)", border: "1px solid var(--border-default)" };
-    if (variant === "ghost")   return { ...base, background: "transparent", color: "var(--text-secondary)", border: "none" };
-    if (variant === "danger")  return { ...base, background: "var(--danger-bg)", color: "var(--danger)", border: "1px solid var(--danger)" };
-    return base;
-}
+// export function btnStyle(variant = "outline") {
+//     const base = {
+//         display: "inline-flex",
+//         alignItems: "center",
+//         gap: 4,
+//         padding: "6px 12px",
+//         borderRadius: 8,
+//         fontSize: 13,
+//         fontWeight: 500,
+//         cursor: "pointer",
+//         transition: "background 0.15s, color 0.15s, border-color 0.15s",
+//         lineHeight: 1.4,
+//         whiteSpace: "nowrap",
+//     };
+//     if (variant === "primary") return { ...base, background: "var(--accent)", color: "#fff", border: "none" };
+//     if (variant === "outline") return { ...base, background: "transparent", color: "var(--text-secondary)", border: "1px solid var(--border-default)" };
+//     if (variant === "ghost")   return { ...base, background: "transparent", color: "var(--text-secondary)", border: "none" };
+//     if (variant === "danger")  return { ...base, background: "var(--danger-bg)", color: "var(--danger)", border: "1px solid var(--danger)" };
+//     return base;
+// }

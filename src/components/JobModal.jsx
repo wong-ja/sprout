@@ -3,7 +3,7 @@ import {
     INTERVIEW_STAGES, JOB_TYPES, WORK_MODES, INDUSTRIES,
     APPLICATION_REQUIREMENTS, columnById, fmtDate, getInitials,
 } from "../store.js";
-import { btnStyle } from "../App.jsx";
+import { btnStyle } from "../store.js";
 
 // ================== HELPER FUNCTIONS =================================================
 function cleanPastedText(raw) {
@@ -32,32 +32,83 @@ function cleanPastedText(raw) {
         return lines.join("\n").slice(0, 5000);
 }
 
-async function callProxy(body) {
+
+const IS_DEV = import.meta.env.DEV;
+
+async function fetchUrlViaJina(url) {
+        if (IS_DEV) {
+                // jina reader
+                const res = await fetch(`https://r.jina.ai/${url.trim()}`, {
+                        headers: { "Accept": "text/plain, text/markdown, */*" },
+                });
+                if (!res.ok) throw new Error(`Could not fetch that page (${res.status}). Try pasting the description instead.`);
+                const text = await res.text();
+                return text.trim().slice(0, 5000);
+        }
+        // vercel prod route through serverless function
         const res = await fetch("/api/autofill", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
+                body: JSON.stringify({ mode: "fetch-url", url }),
         });
         let data;
         try { data = await res.json(); }
         catch { throw new Error("Server returned an unreadable response. Please try again."); }
         if (!res.ok) throw new Error(data?.error ?? `Server error ${res.status}`);
-        return data;
-}
-
-async function fetchUrlViaJina(url) {
-        const data = await callProxy({ mode: "fetch-url", url });
         return data.text ?? "";
 }
 
 async function extractWithGemini(text, userApiKey) {
-        const data = await callProxy({ mode: "extract", text, userApiKey });
+        if (IS_DEV) {
+                // gemini
+                const prompt = buildPrompt(text);
+                const res = await fetch(
+                        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${userApiKey}`,
+                        {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                        contents: [{ parts: [{ text: prompt }] }],
+                                        generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
+                                }),
+                        }
+                );
+                if (res.status === 429) throw new Error("Gemini rate limit reached. Wait a moment and try again.");
+                if (!res.ok) throw new Error(`Gemini error ${res.status}. Check your API key.`);
+                const data = await res.json();
+                const raw     = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+                const clean = raw.replace(/```json|```/g, "").trim();
+                return JSON.parse(clean);
+        }
+        // vercel prod route through serverless function
+        const res = await fetch("/api/autofill", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ mode: "extract", text, userApiKey }),
+        });
+        let data;
+        try { data = await res.json(); }
+        catch { throw new Error("Server returned an unreadable response. Please try again."); }
+        if (!res.ok) throw new Error(data?.error ?? `Server error ${res.status}`);
         const raw     = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
         const clean = raw.replace(/```json|```/g, "").trim();
         return JSON.parse(clean);
 }
 
-// parse pasted text locally (no API needed), basic heuristics
+function buildPrompt(text) {
+        return `You are a job listing parser. Extract the following fields from the job posting text below.
+Return ONLY valid JSON with these exact keys (empty string if unknown):
+company, role, location, workMode, jobType, industry, salary, description, requirements (array, only include values from: Resume / CV, Cover Letter, Portfolio, References, Writing Sample, Work Sample, Assessment / Test, Transcript, Background Check, Video Introduction, LinkedIn Profile, GitHub Profile, Personal Website), tags (array of 3-5 short relevant keywords).
+
+Job posting:
+---
+${text}
+---
+
+Respond with JSON only. No markdown fences, no explanation.`;
+}
+
+// Parse pasted text locally — no API needed
 function extractFromPaste(text) {
     const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
     // COMPANY: look for "at Company" or "About Company" patterns
@@ -68,7 +119,7 @@ function extractFromPaste(text) {
     // SALARY: look for $ / € / £ with numbers
     const salaryMatch = text.match(/[\$£€][\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i);
     // LOCATION
-const locationMatch = text.match(/(?:Location|Based in|Office)[:.]?\s*([A-Z][A-Za-z\s,]+(?:,\s*[A-Z]{2})?)/);
+    const locationMatch = text.match(/(?:Location|Based in|Office)[:.]?\s*([A-Z][A-Za-z\s,]+(?:,\s*[A-Z]{2})?)/);
     // WORK MODE
     const workMode =
         /\bremote\b/i.test(text) ? "Remote" :
@@ -97,7 +148,7 @@ const locationMatch = text.match(/(?:Location|Based in|Office)[:.]?\s*([A-Z][A-Z
         .filter(([, re]) => re.test(text))
         .map(([label]) => label);
 
-        return {
+    return {
         company: companyMatch?.[1]?.trim() ?? "",
         role: roleCandidate ?? "",
         location: locationMatch?.[1]?.trim() ?? "",
@@ -496,7 +547,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                         <textarea
                             value={autofillText}
                             onChange={(e) => setAutofillText(e.target.value)}
-                            placeholder="Paste the full job description here…"
+                            placeholder="Paste the full job description here..."
                             aria-label="Job description text to parse"
                             style={{ ...inputStyle(), minHeight: 90, resize: "vertical", fontSize: 12 }}
                             rows={4}
@@ -517,7 +568,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAutofill(); } }}
                         />
                         <p style={{ margin: "4px 0 8px", fontSize: 11, color: "var(--text-tertiary)" }}>
-                            Requires a Gemini API key (free). Some sites block fetching data--paste or fill-in the description instead.
+                            Requires a Gemini API key (free). If the site blocks fetching, paste the description instead.
                         </p>
                     </>
                 )}
@@ -532,7 +583,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                             type={showKey ? "text" : "password"}
                             value={geminiKey}
                             onChange={(e) => setGeminiKey(e.target.value)}
-                            placeholder="AIza…"
+                            placeholder="AIza..."
                             aria-label="Gemini API key"
                             style={{ ...inputStyle(), flex: 1, fontFamily: "var(--font-mono)", fontSize: 12 }}
                         />
@@ -558,7 +609,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                     style={{ ...btnStyle("primary"), opacity: autofilling ? 0.6 : 1 }}
                     aria-label="Autofill form fields"
                 >
-                    {autofilling ? "Filling…" : "Autofill fields"}
+                    {autofilling ? "Filling..." : "Autofill fields"}
                 </button>
 
                 {autofillError && (
@@ -590,19 +641,19 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                     </Field>
                     <Field label="Work mode">
                         <select value={form.workMode ?? ""} onChange={(e) => set("workMode", e.target.value)} style={inputStyle()}>
-                            <option value="">Select…</option>
+                            <option value="">Select...</option>
                             {WORK_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
                         </select>
                     </Field>
                     <Field label="Job type">
                         <select value={form.jobType ?? ""} onChange={(e) => set("jobType", e.target.value)} style={inputStyle()}>
-                            <option value="">Select…</option>
+                            <option value="">Select...</option>
                             {JOB_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                         </select>
                     </Field>
                     <Field label="Industry">
                         <select value={form.industry ?? ""} onChange={(e) => set("industry", e.target.value)} style={inputStyle()}>
-                            <option value="">Select…</option>
+                            <option value="">Select...</option>
                             {INDUSTRIES.map((i) => <option key={i} value={i}>{i}</option>)}
                         </select>
                     </Field>
@@ -668,7 +719,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                 </div>
                     {/* (CUSTOM) requirement write-in */}
                 <WriteIn
-                    placeholder="Add custom requirement…"
+                    placeholder="Add custom requirement..."
                     onAdd={(val) => {
                         if (val && !(form.requirements ?? []).includes(val))
                             set("requirements", [...(form.requirements ?? []), val]);
@@ -703,7 +754,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
 
             {/* NOTES */}
             <Field label="Notes">
-                <textarea value={form.notes ?? ""} onChange={(e) => set("notes", e.target.value)} placeholder="Why are you interested? Interview notes, follow-up reminders…" style={{ ...inputStyle(), minHeight: 80, resize: "vertical" }} rows={3} />
+                <textarea value={form.notes ?? ""} onChange={(e) => set("notes", e.target.value)} placeholder="Why are you interested? Interview notes, follow-up reminders..." style={{ ...inputStyle(), minHeight: 80, resize: "vertical" }} rows={3} />
             </Field>
 
             {/*  JOB DESCRIPTION ----- AI AUTOFILL OR COPY + PASTE */}

@@ -12,6 +12,37 @@ function parseBody(req) {
     });
 }
 
+function cleanPastedText(raw) {
+    const DROP = [
+        /equal opportunity employer/i,
+        /eeo statement/i,
+        /without regard to race|color|religion|sex|national origin/i,
+        /affirmative action/i,
+        /we do not discriminate/i,
+        /reasonable accommodat/i,
+        /disability.{0,30}veteran/i,
+        /privacy policy/i,
+        /cookie policy/i,
+        /terms of (use|service)/i,
+        /all rights reserved/i,
+        /copyright ©?\s*\d{4}/i,
+        /drug.free workplace/i,
+        /background check(s)? (may|will) be (required|conducted)/i,
+        /compensation (may|will) vary/i,
+        /\bnavigation\b/i,
+        /skip to (main|content)/i,
+        /^(home|about|careers|jobs|login|sign in|sign up|apply now)$/i,
+    ];
+
+    const lines = raw
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l.length > 8)
+        .filter(l => !DROP.some(re => re.test(l)));
+
+    return lines.join("\n").slice(0, 5000);
+}
+
 export default async function handler(req, res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");

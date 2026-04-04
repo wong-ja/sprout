@@ -9,8 +9,7 @@ import {
     useSortable, arrayMove, horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { getInitials, fmtDateShort } from "../store.js";
-import { groupJobs } from "./FilterBar.jsx";
+import { getInitials, fmtDateShort, groupJobs } from "../store.js";
 
 
 // ======= INTERVIEW STAGES =====================================================

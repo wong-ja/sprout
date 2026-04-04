@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { PALETTES } from "../store.js";
-import { btnStyle } from "../App.jsx";
+import { PALETTES, btnStyle } from "../store.js";
 
 // preset colours for column dot picker
 const DOT_PRESETS = [
@@ -292,10 +291,10 @@ function ColumnManager({ columns, onAdd, onRename, onDelete, onReorder, onUpdate
                                     onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingId(null); }}
                                     autoFocus
                                     aria-label={`Rename column ${col.label}`}
-                                    style={{ flex: 1, fontSize: 13, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--bg-surface)", color: "var(--text-primary)", outline: "none" }}
+                                    style={{ flex: 1, fontSize: 13, padding: "4px 8px", width:"125px", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--bg-surface)", color: "var(--text-primary)", outline: "none" }}
                                 />
-                                <button onClick={saveEdit} style={{ ...btnStyle("primary"), padding: "4px 10px", fontSize: 12 }}>Save</button>
-                                <button onClick={() => setEditingId(null)} style={{ ...btnStyle("ghost"), padding: "4px 8px", fontSize: 12 }}>Cancel</button>
+                                <button onClick={saveEdit} style={{ ...btnStyle("primary"), padding: "4px 10px", fontSize: 11 }}>Save</button>
+                                <button onClick={() => setEditingId(null)} style={{ ...btnStyle("ghost"), padding: "4px 8px", fontSize: 11 }}>Cancel</button>
                             </>
                         ) : (
                             <>
@@ -304,7 +303,7 @@ function ColumnManager({ columns, onAdd, onRename, onDelete, onReorder, onUpdate
                                 {!col.locked ? (
                                     <button onClick={() => { if (window.confirm(`Delete "${col.label}"? Jobs will move to Watchlist.`)) onDelete(col.id); }} style={{ ...btnStyle("ghost"), padding: "3px 8px", fontSize: 11, color: "var(--danger)" }} aria-label={`Delete ${col.label}`}>Delete</button>
                                 ) : (
-                                    <span style={{ fontSize: 10, color: "var(--text-tertiary)", padding: "3px 6px" }}>default</span>
+                                    <span style={{ fontSize: 11, color: "var(--text-tertiary)", padding: "3px 6px" }}>default</span>
                                 )}
                             </>
                         )}
@@ -318,7 +317,7 @@ function ColumnManager({ columns, onAdd, onRename, onDelete, onReorder, onUpdate
                     value={newLabel}
                     onChange={(e) => setNewLabel(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") addCol(); }}
-                    placeholder="New column name…"
+                    placeholder="New column name..."
                     aria-label="New column name"
                     style={{ flex: 1, fontSize: 13, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--border-default)", background: "var(--bg-subtle)", color: "var(--text-primary)", outline: "none" }}
                 />
