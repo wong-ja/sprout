@@ -9,7 +9,7 @@ A private, local-first job tracking board. No account required. Your data never 
 - **Kanban board** with drag-and-drop (keyboard accessible)
 - **Table view** - sortable spreadsheet of all jobs
 - **Stats dashboard** - pipeline funnel, industry breakdown, timeline, interview stages
-- **AI autofill** - paste a job URL and Gemini extracts the details automatically
+- **AI autofill** - paste a job URL and Gemini/Openrouter models extracts the details automatically
 - **Interview sub-stages** - Phone Screen, Technical, Panel, Final Round, etc.
 - **Application requirements** - multiselect chips (Resume, Portfolio, References, etc.)
 - **Custom columns** - add, rename, reorder your own pipeline stages
@@ -31,7 +31,7 @@ A private, local-first job tracking board. No account required. Your data never 
 - localStorage + JSON export
 - Vercel
 - Jina Reader - URL & job data fetching (r.jina.ai)
-- Gemini LLM - AI autofill feature (optional; input user API key)
+- Gemini/Openrouter models - AI autofill feature (optional; input user API key)
 
 ---
 
@@ -59,7 +59,7 @@ Opens at: `http://localhost:3000`
 
 ## AI Autofill Setup (optional)
 
-The autofill feature calls the Gemini API. To enable it:
+The autofill feature calls the Gemini and/or OpenRouter API. To enable it:
 
 1. Get an API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
 2. Create an `.env` file in the project root with your API key:
@@ -68,12 +68,21 @@ The autofill feature calls the Gemini API. To enable it:
 VITE_GEMINI_API_KEY=your_key
 ```
 
+OR
+
+1. Get an API key from [OpenRouter](https://openrouter.ai/workspaces/default/keys)
+2. Create an `.env` file in the project root with your API key:
+
+```
+VITE_OPENROUTER_API_KEY=your_key
+```
+
 ---
 
 ## Data & Privacy
 
 - All job data is stored in your browser's `localStorage`
-- Nothing is sent to any server (except the Gemini API call for autofill, if enabled)
+- Nothing is sent to any server (except the Gemini/OpenRouter API call for autofill, if enabled)
 - Export a backup anytime via **Settings → Export backup**
 - Import a backup via **Settings → Import backup** or the **Import** button in the header
 - Clearing browser data will erase your jobs - always keep a backup if needed

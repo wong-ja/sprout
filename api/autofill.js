@@ -1,4 +1,5 @@
-// jina reader fetch job listing --> send cleaned txt to Gemini, return JSON for job fields
+// autofill serverless function (Vercel)
+
 function parseBody(req) {
     return new Promise((resolve, reject) => {
         if (req.body && typeof req.body === "object") return resolve(req.body);
@@ -12,139 +13,135 @@ function parseBody(req) {
     });
 }
 
-function cleanPastedText(raw) {
-    const DROP = [
-        /equal opportunity employer/i,
-        /eeo statement/i,
-        /without regard to race|color|religion|sex|national origin/i,
-        /affirmative action/i,
-        /we do not discriminate/i,
-        /reasonable accommodat/i,
-        /disability.{0,30}veteran/i,
-        /privacy policy/i,
-        /cookie policy/i,
-        /terms of (use|service)/i,
-        /all rights reserved/i,
-        /copyright ©?\s*\d{4}/i,
-        /drug.free workplace/i,
-        /background check(s)? (may|will) be (required|conducted)/i,
-        /compensation (may|will) vary/i,
-        /\bnavigation\b/i,
-        /skip to (main|content)/i,
-        /^(home|about|careers|jobs|login|sign in|sign up|apply now)$/i,
-    ];
 
-    const lines = raw
-        .split("\n")
-        .map(l => l.trim())
-        .filter(l => l.length > 8)
-        .filter(l => !DROP.some(re => re.test(l)));
-
-    return lines.join("\n").slice(0, 5000);
+function buildPrompt(text) {
+    return `You are a job listing parser. Extract fields from the job posting below.
+Return ONLY valid JSON with these exact keys (empty string if unknown):
+company, role, location, workMode, jobType, industry, salary, description,
+requirements (array, only include values from this list: Resume / CV, Cover Letter, Portfolio, References, Writing Sample, Work Sample, Assessment / Test, Transcript, Background Check, Video Introduction, LinkedIn Profile, GitHub Profile, Personal Website),
+tags (array of 3-5 short lowercase keywords).
+workMode must be one of: Remote, Hybrid, On-site, Flexible, or empty string.
+jobType must be one of: Full-time, Part-time, Contract, Freelance, Internship, Temporary, Volunteer, or empty string.
+Job posting:
+---
+${text}
+---
+JSON only. No markdown fences. No explanation.`;
 }
+
+
+function extractFieldsFromProvider(data, provider) {
+    let raw = "";
+    if (provider === "openrouter") {
+        raw = data?.choices?.[0]?.message?.content ?? "";
+    } else {
+        raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    }
+    const clean = raw.replace(/```json|```/g, "").trim();
+    return JSON.parse(clean);
+}
+
 
 export default async function handler(req, res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
     if (req.method === "OPTIONS") return res.status(200).end();
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed." });
 
     let body;
-    try {
-        body = await parseBody(req);
-    } catch (err) {
-        return res.status(400).json({ error: err.message });
-    }
+    try { body = await parseBody(req); }
+    catch (err) { return res.status(400).json({ error: err.message }); }
 
-    const { mode, url, text, userApiKey } = body;
+    const { mode, url, text, provider, userApiKey } = body;
 
-    // jina reader - fetch job data
+    // fetch-url: proxy through jina reader
     if (mode === "fetch-url") {
-        if (!url || typeof url !== "string") {
-            return res.status(400).json({ error: "Missing or invalid url." });
-        }
-
+        if (!url) return res.status(400).json({ error: "Missing url." });
         try {
-            const jinaRes = await fetch(`https://r.jina.ai/${url.trim()}`, {
+            const r = await fetch(`https://r.jina.ai/${url.trim()}`, {
                 headers: { "Accept": "text/plain, text/markdown, */*", "X-Return-Format": "text" },
             });
-
-            if (!jinaRes.ok) {
-                return res.status(jinaRes.status).json({
-                    error: `Could not fetch that page (${jinaRes.status}). Try pasting the description instead.`,
-                });
-            }
-
-            const raw = await jinaRes.text();
+            if (!r.ok) return res.status(r.status).json({ error: `Could not fetch that page (${r.status}). Try pasting instead.` });
+            const raw = await r.text();
             const cleaned = raw.trim().slice(0, 5000);
-
-            if (!cleaned) {
-                return res.status(422).json({
-                    error: "The page returned no readable content. Try pasting the description instead.",
-                });
-            }
-
+            if (!cleaned) return res.status(422).json({ error: "Page returned no readable content. Try pasting instead." });
             return res.status(200).json({ text: cleaned });
         } catch (err) {
-            return res.status(500).json({
-                error: `Could not reach that URL: ${err.message}. Try pasting the description instead.`,
-            });
+            return res.status(500).json({ error: `Fetch failed: ${err.message}. Try pasting instead.` });
         }
     }
 
-    // extract fields via Gemini
+    // extract: LLM field extraction to unified { fields } response
     if (mode === "extract") {
-        const apiKey = process.env.GEMINI_API_KEY || userApiKey;
+        if (!text) return res.status(400).json({ error: "Missing text." });
+
+        const useProvider = provider ?? "openrouter";
+        // prefer server-side env key ; fall back to user-supplied key
+        // NOTE: userApiKey is never logged
+        const apiKey = useProvider === "openrouter"
+            ? (process.env.OPENROUTER_KEY || userApiKey || "")
+            : (process.env.GEMINI_API_KEY  || userApiKey || "");
 
         if (!apiKey) {
             return res.status(400).json({
-                error: "No Gemini API key available. Add your free key in the autofill panel, or use paste mode without a key.",
+                error: "No API key available. Add your free OpenRouter or Gemini key in Settings.",
             });
         }
 
-        if (!text || typeof text !== "string") {
-            return res.status(400).json({ error: "Missing text to extract from." });
-        }
-
-        const prompt = `You are a job listing parser. Extract the following fields from the job posting text below.
-Return ONLY valid JSON with these exact keys (empty string if unknown):
-company, role, location, workMode, jobType, industry, salary, description, requirements (array, only include values from: Resume / CV, Cover Letter, Portfolio, References, Writing Sample, Work Sample, Assessment / Test, Transcript, Background Check, Video Introduction, LinkedIn Profile, GitHub Profile, Personal Website), tags (array of 3-5 short relevant keywords).
-
-Job posting:
----
-${text}
----
-
-Respond with JSON only. No markdown fences, no explanation.`;
+        const prompt = buildPrompt(text);
 
         try {
-            const geminiRes = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-                {
+            let providerData;
+            // Openrouter
+            if (useProvider === "openrouter") {
+                const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${apiKey}`,
+                    },
                     body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
+                        model: "meta-llama/llama-3.3-70b-instruct:free",
+                        messages: [{ role: "user", content: prompt }],
+                        temperature: 0.1,
+                        max_tokens: 1024,
                     }),
+                });
+                providerData = await r.json();
+                if (!r.ok) {
+                    if (r.status === 429) return res.status(429).json({ error: "OpenRouter rate limit reached. Wait a moment and try again." });
+                    return res.status(r.status).json({ error: providerData?.error?.message ?? "OpenRouter error." });
                 }
-            );
-
-            const geminiData = await geminiRes.json();
-
-            if (!geminiRes.ok) {
-                const code = geminiData?.error?.code ?? geminiRes.status;
-                const msg    = geminiData?.error?.message ?? "Unknown Gemini error.";
-                if (code === 429) return res.status(429).json({ error: "Gemini rate limit reached. Wait a moment and try again, or use paste mode without a key." });
-                if (code === 400) return res.status(400).json({ error: "Text may still be too long for Gemini. Try pasting a shorter excerpt." });
-                return res.status(geminiRes.status).json({ error: msg });
+            } else {
+                // Gemini
+                const r = await fetch(
+                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: prompt }] }],
+                            generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
+                        }),
+                    }
+                );
+                providerData = await r.json();
+                if (!r.ok) {
+                    if (r.status === 429) return res.status(429).json({ error: "Gemini rate limit reached. Switch to OpenRouter for more generous free limits." });
+                    if (r.status === 400) return res.status(400).json({ error: "Text too long for Gemini. Try pasting a shorter excerpt." });
+                    return res.status(r.status).json({ error: providerData?.error?.message ?? "Gemini error." });
+                }
             }
 
-            return res.status(200).json(geminiData);
+            const fields = extractFieldsFromProvider(providerData, useProvider);
+            return res.status(200).json({ fields });
+
         } catch (err) {
-            return res.status(500).json({ error: `Gemini request failed: ${err.message}` });
+            if (err instanceof SyntaxError) {
+                return res.status(422).json({ error: "AI returned unparseable output. Try again or paste the description." });
+            }
+            return res.status(500).json({ error: err.message });
         }
     }
 
