@@ -83,7 +83,9 @@ a:hover { text-decoration: underline; }
     --col-custom-text:     #6b21a8;
 }
 
-/* HARVEST */
+/* PALETTES */
+
+/* HARVEST (default) */
 :root, [data-palette="harvest"] {
     --accent:         #dd911e;
     --accent-light:   #f6e7c7;
@@ -243,7 +245,7 @@ a:hover { text-decoration: underline; }
     --wordmark-color: #6366f1;
 }
 
-/* HIGH CONTRAST  (accessibility — WCAG AAA) */
+/* HIGH CONTRAST (WCAG AAA) */
 [data-palette="hc"] {
     --accent:         hsl(240, 100%, 40%);
     --accent-light:   #e0e8ff;
@@ -263,7 +265,6 @@ a:hover { text-decoration: underline; }
     --wordmark-color: #e0e8ff;
     --logo-leaf1:     #007700;
     --logo-leaf2:     #000000;
-    /* Column overrides — full contrast versions */
     --col-watchlist-dot:   #555555;
     --col-watchlist-bg:    #eeeeee;
     --col-watchlist-text:  #000000;
@@ -297,7 +298,6 @@ a:hover { text-decoration: underline; }
     --border-default: #2f3640;
     --border-subtle:  #20242b;
     --border-strong:  #3f4854;
-    /* Column badges — brightened for dark backgrounds */
     --col-watchlist-bg:    #1f2329;
     --col-watchlist-text:  #9ca3af;
     --col-applied-bg:      #111827;
@@ -315,16 +315,17 @@ a:hover { text-decoration: underline; }
     --shadow-lg:  0 12px 32px rgba(0,0,0,0.55);
 }
 
+/* UTILITY */
 .sr-only {
     position: absolute; width: 1px; height: 1px;
     padding: 0; margin: -1px; overflow: hidden;
     clip: rect(0,0,0,0); white-space: nowrap; border: 0;
 }
 
-.truncate { 
-    overflow: hidden; 
-    text-overflow: ellipsis; 
-    white-space: nowrap; 
+.truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .sprout-wordmark {
@@ -336,29 +337,34 @@ a:hover { text-decoration: underline; }
     line-height: 1;
 }
 
-.stats-desktop {
-    display: block;
-}
+/* RESPONSIVE HEADER */
+.stats-desktop { display: block; }
 @media (max-width: 700px) {
-    .stats-desktop {
-        display: none;
-    }
+    .stats-desktop { display: none; }
 }
 
 .btn-text {
-    display: block;
+    display: inline;
 }
-@media (max-width: 880px) {
-    .btn-text {
-        display: none;
-    }
-}
-
 .btn-icon {
     display: none;
 }
-@media (max-width: 880px) {
-    .btn-icon {
-        display: inline-flex;
+@media (max-width: 640px) {
+    .btn-text { display: none; }
+    .btn-icon { display: inline-flex; }
+}
+
+.btn-text-secondary {
+    display: inline;
+    margin-left: 4px;
+}
+@media (max-width: 900px) {
+    .btn-text-secondary { display: none; }
+}
+
+@media (max-width: 480px) {
+    .header-secondary.import-btn,
+    .header-secondary.export-btn {
+        display: none;
     }
 }

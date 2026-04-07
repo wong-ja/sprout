@@ -2,7 +2,7 @@ import { useState } from "react";
 import {
     DndContext, DragOverlay, PointerSensor, KeyboardSensor,
     useSensor, useSensors, pointerWithin, rectIntersection,
-    closestCenter,
+    useDroppable,
 } from "@dnd-kit/core";
 import {
     SortableContext, verticalListSortingStrategy,
@@ -52,7 +52,7 @@ export default function Board({ jobs, columns, groupBy, onAddJob, onOpenJob, onM
         useSensor(KeyboardSensor)
     );
 
-  // when grouping by non-status, show read-only grouped columns
+    // when grouping by non-status, show read-only grouped columns
     const isStatusGrouped = !groupBy || groupBy === "status";
     const groups = isStatusGrouped
         ? columns.map(col => ({ key: col.id, label: col.label, col, jobs: jobs.filter(j => j.column === col.id) }))
@@ -159,7 +159,7 @@ export default function Board({ jobs, columns, groupBy, onAddJob, onOpenJob, onM
                         </div>
                     )}
 
-                    {groups.map((group) => {
+                    {groups.map(group => {
                         const col = group.col ?? columns.find(c => c.id === "watchlist");
                         const fallbackCol = col ?? { id: group.key, label: group.label, color: "var(--accent)", bg: "var(--accent-light)", textColor: "var(--accent-text)" };
                         return (
@@ -190,7 +190,7 @@ export default function Board({ jobs, columns, groupBy, onAddJob, onOpenJob, onM
                         isOverlay
                     />
                 ) : overlayCol ? (
-                    <ColumnShell col={overlayCol} isOverlay />
+                    <ColumnShell col={overlayCol} />
                 ) : null}
             </DragOverlay>
         </DndContext>
@@ -215,8 +215,8 @@ function SortableColumn({ col, ...props }) {
     );
 }
 
-// placeholder shown in DragOverlay when dragging a column
-function ColumnShell({ col, isOverlay }) {
+// placeholder shown in DragOverlay when dragging a whole column
+function ColumnShell({ col }) {
     return (
         <div style={{
             minWidth: 240, width: 260,
@@ -233,7 +233,7 @@ function ColumnShell({ col, isOverlay }) {
 }
 
 // ============== COLUMN GROUPS ======================================================
-function Column({ col, label, jobs, allCount, onAddJob, onOpenJob, isDndEnabled, allColumns, groupBy, dragHandleProps, isDraggingColumn }) {
+function Column({ col, label, jobs, allCount, onAddJob, onOpenJob, isDndEnabled, allColumns, groupBy, dragHandleProps }) {
     const tintBg   = col.color ? hexToRgba(col.color, 0.06) : "var(--bg-surface)";
     const tintBorder = col.color ? hexToRgba(col.color, 0.22) : "var(--border-default)";
 
@@ -267,10 +267,7 @@ function Column({ col, label, jobs, allCount, onAddJob, onOpenJob, isDndEnabled,
                 title={isDndEnabled ? "Drag to reorder column" : undefined}
             >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div
-                        aria-hidden="true"
-                        style={{ width: 8, height: 8, borderRadius: "50%", background: col.color, flexShrink: 0 }}
-                    />
+                    <div aria-hidden="true" style={{ width: 8, height: 8, borderRadius: "50%", background: col.color, flexShrink: 0 }} />
                     <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{label ?? col.label}</span>
                     <span
                         aria-label={`${allCount} jobs`}
@@ -303,8 +300,6 @@ function Column({ col, label, jobs, allCount, onAddJob, onOpenJob, isDndEnabled,
 
                 {/* kanban cards */}
             <div
-                id={`col-drop-${col.id}`}
-                data-col-id={col.id}
                 style={{
                     padding: "8px",
                     flex: 1,
@@ -335,25 +330,32 @@ function Column({ col, label, jobs, allCount, onAddJob, onOpenJob, isDndEnabled,
 }
 
 function ColumnDropZone({ colId, isEmpty, onAddJob, colLabel }) {
-    const { setNodeRef, isOver } = useSortable({ id: colId, disabled: true });
-    return isEmpty ? (
+    const { setNodeRef, isOver } = useDroppable({ id: colId });
+    if (!isEmpty) return null;
+
+    return (
         <button
+            ref={setNodeRef}
             onClick={onAddJob}
             aria-label={`Add first job to ${colLabel}`}
             style={{
-                border: "2px dashed var(--border-default)",
-                borderRadius: 10, padding: "20px 12px",
-                textAlign: "center", color: "var(--text-tertiary)",
-                fontSize: 12, cursor: "pointer",
-                background: "transparent", width: "100%",
-                transition: "border-color 0.15s, color 0.15s",
+                border: `2px dashed ${isOver ? "var(--accent)" : "var(--border-default)"}`,
+                borderRadius: 10, 
+                padding: "20px 12px",
+                textAlign: "center",
+                color: isOver ? "var(--accent-text)" : "var(--text-tertiary)",
+                fontSize: 12, 
+                cursor: "pointer",
+                background: isOver ? "var(--accent-light)" : "transparent",
+                width: "100%",
+                transition: "border-color 0.15s, color 0.15s, background 0.15s",
             }}
             onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--border-strong)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border-default)"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = isOver ? "var(--accent)" : "var(--border-default)"; e.currentTarget.style.color = isOver ? "var(--accent-text)" : "var(--text-tertiary)"; }}
         >
             Add a job
         </button>
-    ) : null;
+    );
 }
 
 function SortableCard({ job, col, onOpen, allColumns, groupBy }) {
@@ -412,7 +414,7 @@ function JobCard({ job, col, onOpen, isOverlay = false, allColumns = [], groupBy
                         {job.role}
                     </p>
                 </div>
-                {/* company initials -- can change to rand image? */}
+                {/* company initials */}
                 <div
                     aria-hidden="true"
                     style={{
@@ -427,6 +429,7 @@ function JobCard({ job, col, onOpen, isOverlay = false, allColumns = [], groupBy
                 </div>
             </div>
 
+            {/* status badge (only when grouped by something other than status) */}
             {showStatusBadge && jobCol && (
                 <div style={{ marginBottom: 5 }}>
                     <span style={{

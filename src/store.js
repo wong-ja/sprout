@@ -374,7 +374,7 @@ export function groupJobs(jobs, groupBy, columns) {
 export function btnStyle(variant = "outline") {
     const base = {
         display: "inline-flex", alignItems: "center", gap: 4,
-        padding: "6px 12px", borderRadius: 8, fontSize: 13, fontWeight: 500,
+        padding: "6px 10px", borderRadius: 8, fontSize: 13, fontWeight: 500,
         cursor: "pointer", transition: "background 0.15s, color 0.15s, border-color 0.15s",
         lineHeight: 1.4, whiteSpace: "nowrap",
     };
