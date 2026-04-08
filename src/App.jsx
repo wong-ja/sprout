@@ -381,8 +381,9 @@ export default function App() {
                     />
                 )}
                 {view === "stats" && (
-                    <Stats jobs={filteredJobs} allJobs={jobs} columns={columns} hasFilters={filteredJobs.length !== jobs.length} />
+                    <Stats jobs={filteredJobs} allJobs={jobs} columns={columns} hasFilters={filteredJobs.length !== jobs.length} onFilterChange={setFilters} onViewChange={setView} />
                 )}
+
             </main>
 
             {/* job modal */}
