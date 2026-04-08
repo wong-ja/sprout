@@ -57,7 +57,7 @@ export default function Stats({ jobs, allJobs, columns, hasFilters, onFilterChan
             aria-label="Application statistics dashboard"
             style={{ flex: 1, overflowY: "auto", padding: "20px", background: "var(--bg-page)" }}
         >
-            <div style={{ maxWidth: 960, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
 
                 {/* FILTERS NOTICE */}
                 {hasFilters && (
@@ -70,16 +70,16 @@ export default function Stats({ jobs, allJobs, columns, hasFilters, onFilterChan
                 {/* SUMMARY STATS / METRIC CARDS */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
                     {[
-                        { label: "Total tracked",       val: s.total },
-                        { label: "Applications",        val: s.applied },
-                        { label: "Interviews",          val: s.interviews },
-                        { label: "Offers",              val: s.offers },
-                        { label: "Rejected",            val: s.rejected },
-                        { label: "Response rate",       val: `${s.responseRate}%` },
-                        { label: "Avg. days to reply",  val: s.avgDaysToResponse !== null ? `${s.avgDaysToResponse}d` : "—", title: "Average days from adding a job to reaching Interviewing" },
-                        { label: "Active this week",    val: s.activeThisWeek },
+                        { label: "Total tracked",       val: s.total, colorIndex: 1 },
+                        { label: "Applications",        val: s.applied, colorIndex: 0 },
+                        { label: "Interviews",          val: s.interviews, colorIndex: 2 },
+                        { label: "Offers",              val: s.offers, colorIndex: 3 },
+                        { label: "Rejected",            val: s.rejected, colorIndex: 5 },
+                        { label: "Response rate",       val: `${s.responseRate}%`, colorIndex: 4 },
+                        { label: "Avg. days to reply",  val: s.avgDaysToResponse !== null ? `${s.avgDaysToResponse}d` : "—", title: "Average days from adding a job to reaching Interviewing", colorIndex: 6 },
+                        { label: "Active this week",    val: s.activeThisWeek, colorIndex: 2 },
                     ].map(m => (
-                        <MetricCard key={m.label} label={m.label} value={m.val} title={m.title} />
+                        <MetricCard key={m.label} label={m.label} value={m.val} title={m.title} colorIndex={m.colorIndex} />
                     ))}
                 </div>
 
@@ -219,11 +219,14 @@ export default function Stats({ jobs, allJobs, columns, hasFilters, onFilterChan
 
 
 // shared wrappers
-function MetricCard({ label, value, title }) {
+function MetricCard({ label, value, title, colorIndex }) {
+    const subtleBg = colorIndex !== undefined 
+        ? `linear-gradient(135deg, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.4) 100%), rgba(${parseInt(CHART_COLORS[colorIndex].slice(1), 16)}, ${parseInt(CHART_COLORS[colorIndex].slice(3,5), 16)}, ${parseInt(CHART_COLORS[colorIndex].slice(5,7), 16)}, 0.25)` 
+        : "var(--bg-surface)";
     return (
         <div
             title={title}
-            style={{ background: "var(--bg-surface)", border: "1px solid var(--border-default)", borderRadius: 10, padding: "14px 16px" }}
+            style={{ background: subtleBg, border: "1px solid var(--border-default)", borderRadius: 10, padding: "14px 16px" }}
         >
             <p style={{ margin: "0 0 4px", fontSize: 10, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</p>
             <p style={{ margin: 0, fontSize: 24, fontWeight: 700, color: "var(--text-primary)", letterSpacing: "-0.02em" }}>{value}</p>
