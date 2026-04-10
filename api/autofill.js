@@ -37,12 +37,16 @@ function extractFieldsFromProvider(data, provider) {
     } else {
         raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
     }
-    // strip markdown fences in case the model ignores the no-fences instruction
-    const clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-    // find the first { ... } block in case the model adds preamble text
+    // strip <think>...</think> reasoning blocks (DeepSeek R1, QwQ, etc.)
+    let clean = raw.replace(/<think>[\s\S]*?<\/think>/gi, "");
+    // strip markdown fences
+    clean = clean.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+    // find the outermost { ... } block — handles preamble/postamble text
     const start = clean.indexOf("{");
     const end   = clean.lastIndexOf("}");
-    if (start === -1 || end === -1) throw new SyntaxError("No JSON object found in LLM response.");
+    if (start === -1 || end === -1 || end < start) {
+        throw new SyntaxError(`No JSON object found in LLM response. Raw: ${raw.slice(0, 200)}`);
+    }
     return JSON.parse(clean.slice(start, end + 1));
 }
 
@@ -107,9 +111,8 @@ export default async function handler(req, res) {
                         "Authorization": `Bearer ${apiKey}`,
                     },
                     body: JSON.stringify({
-                        // openrouter/free auto-selects from all currently available free models.
-                        // avoids hardcoding a specific :free model that can be deprecated at any time.
-                        model: "openrouter/free",
+                        // llama-3.3-70b: stable, consistently available free model, clean JSON output, no thinking tokens.
+                        model: "meta-llama/llama-3.3-70b-instruct:free",
                         messages: [{ role: "user", content: prompt }],
                         temperature: 0.1,
                         max_tokens: 1024,
@@ -118,7 +121,7 @@ export default async function handler(req, res) {
                 providerData = await r.json();
                 if (!r.ok) {
                     if (r.status === 429) return res.status(429).json({ error: "OpenRouter rate limit reached. Wait a moment and try again." });
-                    return res.status(r.status).json({ error: providerData?.error?.message ?? "OpenRouter error." });
+                    return res.status(r.status).json({ error: providerData?.error?.message ?? `OpenRouter error ${r.status}.` });
                 }
             } else {
                 // Gemini direct
@@ -137,7 +140,7 @@ export default async function handler(req, res) {
                 if (!r.ok) {
                     if (r.status === 429) return res.status(429).json({ error: "Gemini rate limit reached. Switch to OpenRouter for more generous free limits." });
                     if (r.status === 400) return res.status(400).json({ error: "Text too long for Gemini. Try pasting a shorter excerpt." });
-                    return res.status(r.status).json({ error: providerData?.error?.message ?? "Gemini error." });
+                    return res.status(r.status).json({ error: providerData?.error?.message ?? `Gemini error ${r.status}.` });
                 }
             }
 
@@ -146,7 +149,7 @@ export default async function handler(req, res) {
 
         } catch (err) {
             if (err instanceof SyntaxError) {
-                return res.status(422).json({ error: "AI returned unparseable output. Try again or paste the description." });
+                return res.status(422).json({ error: `AI returned unparseable output: ${err.message}` });
             }
             return res.status(500).json({ error: err.message });
         }

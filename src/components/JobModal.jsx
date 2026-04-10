@@ -55,59 +55,97 @@ async function fetchUrlViaJina(url) {
     return data.text ?? "";
 }
 
+// robust JSON extractor
+function parseJSON(raw) {
+    // 1. strip <think>...</think> reasoning blocks (DeepSeek R1, QwQ, etc.)
+    let clean = raw.replace(/<think>[\s\S]*?<\/think>/gi, "");
+    // 2. strip markdown fences
+    clean = clean.replace(/```json\s*/gi, "").replace(/```\s*/g, "");
+    // 3. find outermost { ... } — handles preamble/postamble text
+    const start = clean.indexOf("{");
+    const end   = clean.lastIndexOf("}");
+    if (start === -1 || end === -1 || end < start) {
+        throw new SyntaxError(`No JSON object found in LLM response. Raw: ${raw.slice(0, 200)}`);
+    }
+    return JSON.parse(clean.slice(start, end + 1));
+}
 
-// callLLM - returns normalised fields object (job data)
-async function callLLM(text, provider, apiKey) {
+// single-provider fetch (dev, direct to provider API)
+async function fetchFromOpenRouter(text, apiKey) {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+            // llama-3.3-70b: stable free model, clean JSON output, no thinking tokens
+            model: "meta-llama/llama-3.3-70b-instruct:free",
+            messages: [{ role: "user", content: buildPrompt(text) }],
+            temperature: 0.1,
+            max_tokens: 1024,
+        }),
+    });
+    if (res.status === 429) throw Object.assign(new Error("rate_limit"), { isRateLimit: true, provider: "openrouter" });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error?.message ?? `OpenRouter error ${res.status}. Check your API key in Settings.`);
+    }
+    const data = await res.json();
+    return parseJSON(data.choices?.[0]?.message?.content ?? "");
+}
+
+async function fetchFromGemini(text, apiKey) {
+    const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: buildPrompt(text) }] }],
+                generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
+            }),
+        }
+    );
+    if (res.status === 429) throw Object.assign(new Error("rate_limit"), { isRateLimit: true, provider: "gemini" });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error?.message ?? `Gemini error ${res.status}. Check your API key in Settings.`);
+    }
+    const data = await res.json();
+    return parseJSON(data.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
+}
+
+// callLLM - tries both providers, Gemini falls back to OpenRouter on 429
+async function callLLM(text, provider, apiKey, allKeys) {
     if (IS_DEV) {
-        const prompt = buildPrompt(text);
-        let raw = "";
+        const orKey     = allKeys?.openrouter ?? "";
+        const geminiKey = allKeys?.gemini ?? "";
 
-        if (provider === "openrouter") {
-            const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${apiKey}`,
-                },
-                body: JSON.stringify({
-                    // openrouter/free auto-selects from all currently available free models
-                    // avoids hardcoding a specific :free model that can be deprecated at any time
-                    model: "openrouter/free",
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.1,
-                    max_tokens: 1024,
-                }),
-            });
-            if (res.status === 429) throw new Error("Rate limit reached. Wait a moment and try again.");
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err?.error?.message ?? `OpenRouter error ${res.status}. Check your API key.`);
+        // Gemini
+        if (geminiKey) {
+            try {
+                const fields = await fetchFromGemini(text, geminiKey);
+                console.log("[autofill] fields from Gemini:", fields);
+                return fields;
+            } catch (err) {
+                if (!err.isRateLimit) throw err;
+                console.warn("[autofill] Gemini 429 — falling back to OpenRouter");
             }
-            const data = await res.json();
-            raw = data.choices?.[0]?.message?.content ?? "";
-        } else {
-            // Gemini direct
-            const res = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-                {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
-                    }),
-                }
-            );
-            if (res.status === 429) throw new Error("Gemini rate limit reached. Try OpenRouter instead — it's more generous.");
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err?.error?.message ?? `Gemini error ${res.status}. Check your API key.`);
-            }
-            const data = await res.json();
-            raw = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
         }
 
-        return parseJSON(raw);
+        if (orKey) {
+            try {
+                const fields = await fetchFromOpenRouter(text, orKey);
+                console.log("[autofill] fields from OpenRouter:", fields);
+                return fields;
+            } catch (err) {
+                if (!err.isRateLimit) throw err;
+                console.warn("[autofill] OpenRouter 429 — both providers rate limited");
+            }
+        }
+
+        throw new Error("Both providers are rate limited right now. Wait a moment and try again, or switch to paste mode.");
     }
 
     // prod: route through serverless - response is already unified { fields }
@@ -119,17 +157,9 @@ async function callLLM(text, provider, apiKey) {
     const data = await res.json().catch(() => { throw new Error("Server returned an unreadable response."); });
     if (!res.ok) throw new Error(data?.error ?? `Server error ${res.status}`);
     if (!data.fields) throw new Error("Unexpected response from server. Try again.");
-    return data.fields;
-}
 
-function parseJSON(raw) {
-    // strip markdown fences in case the model ignores the no-fences instruction
-    const clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-    // find the first { ... } block in case the model adds preamble text
-    const start = clean.indexOf("{");
-    const end   = clean.lastIndexOf("}");
-    if (start === -1 || end === -1) throw new SyntaxError("No JSON object found in response.");
-    return JSON.parse(clean.slice(start, end + 1));
+    console.log("[autofill] fields from server:", data.fields);
+    return data.fields;
 }
 
 function buildPrompt(text) {
@@ -544,12 +574,14 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
         try {
             let extracted;
             const activeKey = getActiveKey();
+            // pass both keys so callLLM can fall back between providers on 429
+            const allKeys = { openrouter: openrouterKey, gemini: geminiKey };
 
             if (autofillMode === "paste") {
                 // PASTE mode
                 if (!autofillText.trim()) throw new Error("Please paste the job description first.");
                 if (activeKey) {
-                    extracted = await callLLM(cleanPastedText(autofillText), activeKey.provider, activeKey.key);
+                    extracted = await callLLM(cleanPastedText(autofillText), activeKey.provider, activeKey.key, allKeys);
                 } else {
                     // no key - local heuristic. Only fills what regex is reliable for
                     // (work mode, job type, salary, requirements, description).
@@ -563,8 +595,11 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                 const pageText = await fetchUrlViaJina(autofillUrl.trim());
                 // FIX: guard against Jina returning empty content (blocked pages, paywalls, login walls, Workday, Greenhouse, etc.)
                 if (!pageText?.trim()) throw new Error("Couldn't read that page — it may be behind a login or block scrapers. Try pasting the description instead.");
-                extracted = await callLLM(pageText, activeKey.provider, activeKey.key);
+                extracted = await callLLM(pageText, activeKey.provider, activeKey.key, allKeys);
             }
+
+            // DEBUG
+            console.log("[autofill] merging into form:", extracted);
 
             setForm(f => mergeExtracted(
                 f,
@@ -574,6 +609,8 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
             setAutofillSuccess(true);
 
         } catch (err) {
+            // DEBUG
+            console.error("[autofill] error:", err);
             setAutofillError(err.message || "Couldn't extract job details. Try pasting the description instead.");
         }
 
