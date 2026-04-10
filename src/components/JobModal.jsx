@@ -62,7 +62,7 @@ async function callLLM(text, provider, apiKey) {
         const prompt = buildPrompt(text);
         let raw = "";
 
-        // Openrouter
+        // Openrouter - tries gemini-flash free first, falls back to llama
         if (provider === "openrouter") {
             const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                 method: "POST",
@@ -71,7 +71,8 @@ async function callLLM(text, provider, apiKey) {
                     "Authorization": `Bearer ${apiKey}`,
                 },
                 body: JSON.stringify({
-                    model: "meta-llama/llama-3.3-70b-instruct:free",
+                    // gemini-flash via openrouter is more reliable at clean JSON output than llama-3.3-70b which occasionally ignores the no-fences instruction
+                    model: "google/gemini-2.0-flash-exp:free",
                     messages: [{ role: "user", content: prompt }],
                     temperature: 0.1,
                     max_tokens: 1024,
@@ -136,14 +137,16 @@ JSON only. No markdown fences. No explanation.`;
 }
 
 
-// no API - paste info
+// no API - paste heuristic extraction
 function extractFromPaste(text) {
     const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
 
     const companyMatch = text.match(/(?:at|@|About|Company:?)\s+([A-Z][A-Za-z0-9\s&.,'-]{1,40})/);
 
-    const rolePattern = /\b(Engineer|Designer|Manager|Director|Analyst|Coordinator|Developer|Specialist|Lead|Officer|Associate|Consultant|Advisor|Writer|Editor|Nurse|Teacher|Therapist|Architect|Scientist|Producer|Recruiter|Assistant|Administrator|Representative|Technician)\b/i;
-    const roleCandidate = lines.find(l => rolePattern.test(l) && l.length < 80) ?? "";
+    // extract just the matched role keyword + any adjacent qualifier words
+    const rolePattern = /(?:(?:senior|junior|lead|staff|principal|mid|associate|entry.?level)\s+)?(?:software\s+)?(?:Engineer|Designer|Manager|Director|Analyst|Coordinator|Developer|Specialist|Lead|Officer|Associate|Consultant|Advisor|Writer|Editor|Nurse|Teacher|Therapist|Architect|Scientist|Producer|Recruiter|Assistant|Administrator|Representative|Technician)(?:\s+(?:II|III|IV|I|Manager|Lead))?/i;
+    const roleMatch = text.match(rolePattern);
+    const role = roleMatch?.[0]?.trim() ?? "";
 
     const salaryMatch = text.match(/[\$£€][\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i);
 
@@ -175,7 +178,7 @@ function extractFromPaste(text) {
 
     return {
         company:      companyMatch?.[1]?.trim() ?? "",
-        role:         roleCandidate,
+        role,
         location:     locationMatch?.[1]?.trim() ?? "",
         workMode,
         jobType,
@@ -188,9 +191,11 @@ function extractFromPaste(text) {
 }
 
 
-// autofill info to form on fields with/out user input
+// apply extracted fields to form, preserving any user-typed values
 function mergeExtracted(form, extracted, sourceUrl) {
-    const pick = (extracted, form) => extracted || form;
+    // FIX: renamed inner param to avoid shadowing outer `form` object.
+    // `pick(a, b)` returns a if truthy, else b - prefers extracted over existing.
+    const pick = (extracted, existing) => extracted || existing;
     return {
         ...form,
         // if autofilled from a URL, populate the url field too
@@ -206,7 +211,9 @@ function mergeExtracted(form, extracted, sourceUrl) {
         requirements: extracted.requirements?.length ? extracted.requirements : form.requirements,
         tags: Array.isArray(extracted.tags) && extracted.tags.length
             ? extracted.tags.join(", ")
-            : form.tags,
+            : typeof extracted.tags === "string" && extracted.tags
+                ? extracted.tags
+                : form.tags,
     };
 }
 
@@ -458,7 +465,7 @@ const labelStyle = {
 };
 
 
-// ================== FORM NODY =======================================================
+// ================== FORM BODY =======================================================
 function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
     const [form, setForm]             = useState(initial);
     const [errors, setErrors]         = useState({});
@@ -522,11 +529,12 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
             const activeKey = getActiveKey();
 
             if (autofillMode === "paste") {
-                // PASTE mode - no key
+                // PASTE mode
                 if (!autofillText.trim()) throw new Error("Please paste the job description first.");
                 if (activeKey) {
                     extracted = await callLLM(cleanPastedText(autofillText), activeKey.provider, activeKey.key);
                 } else {
+                    // no key - local heuristic
                     extracted = extractFromPaste(autofillText);
                 }
             } else {
@@ -534,6 +542,8 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                 if (!autofillUrl.trim()) throw new Error("Please enter a URL.");
                 if (!activeKey) throw new Error("An API key is needed to autofill from a URL. Add an OpenRouter or Gemini key in Settings, or paste the description instead.");
                 const pageText = await fetchUrlViaJina(autofillUrl.trim());
+                // FIX: guard against Jina returning empty content (blocked pages, paywalls, etc.)
+                if (!pageText?.trim()) throw new Error("Couldn't read that page — it may be behind a login or block scrapers. Try pasting the description instead.");
                 extracted = await callLLM(pageText, activeKey.provider, activeKey.key);
             }
 
@@ -552,7 +562,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
     };
 
     return (
-        // AUTOFILL 
+        // AUTOFILL
         <div style={{ display: "flex", flexDirection: "column", gap: 18, fontFamily: "var(--font-sans)", fontSize: 14 }}>
             <section aria-labelledby="autofill-heading">
                 <p id="autofill-heading" style={{ ...labelStyle, marginBottom: 10 }}>Autofill from job listing</p>

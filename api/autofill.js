@@ -102,7 +102,8 @@ export default async function handler(req, res) {
                         "Authorization": `Bearer ${apiKey}`,
                     },
                     body: JSON.stringify({
-                        model: "meta-llama/llama-3.3-70b-instruct:free",
+                        // gemini-flash via openrouter is more reliable at clean JSON output than llama-3.3-70b which occasionally wraps in markdown fences
+                        model: "google/gemini-2.0-flash-exp:free",
                         messages: [{ role: "user", content: prompt }],
                         temperature: 0.1,
                         max_tokens: 1024,
@@ -114,7 +115,7 @@ export default async function handler(req, res) {
                     return res.status(r.status).json({ error: providerData?.error?.message ?? "OpenRouter error." });
                 }
             } else {
-                // Gemini
+                // Gemini direct
                 const r = await fetch(
                     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
                     {
