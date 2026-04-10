@@ -37,8 +37,13 @@ function extractFieldsFromProvider(data, provider) {
     } else {
         raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
     }
-    const clean = raw.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
+    // strip markdown fences in case the model ignores the no-fences instruction
+    const clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+    // find the first { ... } block in case the model adds preamble text
+    const start = clean.indexOf("{");
+    const end   = clean.lastIndexOf("}");
+    if (start === -1 || end === -1) throw new SyntaxError("No JSON object found in LLM response.");
+    return JSON.parse(clean.slice(start, end + 1));
 }
 
 
@@ -102,8 +107,9 @@ export default async function handler(req, res) {
                         "Authorization": `Bearer ${apiKey}`,
                     },
                     body: JSON.stringify({
-                        // gemini-flash via openrouter is more reliable at clean JSON output than llama-3.3-70b which occasionally wraps in markdown fences
-                        model: "google/gemini-2.0-flash-exp:free",
+                        // openrouter/free auto-selects from all currently available free models.
+                        // avoids hardcoding a specific :free model that can be deprecated at any time.
+                        model: "openrouter/free",
                         messages: [{ role: "user", content: prompt }],
                         temperature: 0.1,
                         max_tokens: 1024,

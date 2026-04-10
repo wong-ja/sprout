@@ -62,7 +62,6 @@ async function callLLM(text, provider, apiKey) {
         const prompt = buildPrompt(text);
         let raw = "";
 
-        // Openrouter - tries gemini-flash free first, falls back to llama
         if (provider === "openrouter") {
             const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                 method: "POST",
@@ -71,19 +70,23 @@ async function callLLM(text, provider, apiKey) {
                     "Authorization": `Bearer ${apiKey}`,
                 },
                 body: JSON.stringify({
-                    // gemini-flash via openrouter is more reliable at clean JSON output than llama-3.3-70b which occasionally ignores the no-fences instruction
-                    model: "google/gemini-2.0-flash-exp:free",
+                    // openrouter/free auto-selects from all currently available free models
+                    // avoids hardcoding a specific :free model that can be deprecated at any time
+                    model: "openrouter/free",
                     messages: [{ role: "user", content: prompt }],
                     temperature: 0.1,
                     max_tokens: 1024,
                 }),
             });
             if (res.status === 429) throw new Error("Rate limit reached. Wait a moment and try again.");
-            if (!res.ok) throw new Error(`OpenRouter error ${res.status}. Check your API key.`);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err?.error?.message ?? `OpenRouter error ${res.status}. Check your API key.`);
+            }
             const data = await res.json();
             raw = data.choices?.[0]?.message?.content ?? "";
         } else {
-            // Gemini
+            // Gemini direct
             const res = await fetch(
                 `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
                 {
@@ -96,7 +99,10 @@ async function callLLM(text, provider, apiKey) {
                 }
             );
             if (res.status === 429) throw new Error("Gemini rate limit reached. Try OpenRouter instead — it's more generous.");
-            if (!res.ok) throw new Error(`Gemini error ${res.status}. Check your API key.`);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err?.error?.message ?? `Gemini error ${res.status}. Check your API key.`);
+            }
             const data = await res.json();
             raw = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
         }
@@ -117,15 +123,20 @@ async function callLLM(text, provider, apiKey) {
 }
 
 function parseJSON(raw) {
-    const clean = raw.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
+    // strip markdown fences in case the model ignores the no-fences instruction
+    const clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+    // find the first { ... } block in case the model adds preamble text
+    const start = clean.indexOf("{");
+    const end   = clean.lastIndexOf("}");
+    if (start === -1 || end === -1) throw new SyntaxError("No JSON object found in response.");
+    return JSON.parse(clean.slice(start, end + 1));
 }
 
 function buildPrompt(text) {
     return `You are a job listing parser. Extract fields from the job posting below.
 Return ONLY valid JSON with these exact keys (empty string if unknown):
 company, role, location, workMode, jobType, industry, salary, description,
-requirements (array, only include from: Resume / CV, Cover Letter, Portfolio, References, Writing Sample, Work Sample, Assessment / Test, Transcript, Background Check, Video Introduction, LinkedIn Profile, GitHub Profile, Personal Website),
+requirements (array, only include values from this list: Resume / CV, Cover Letter, Portfolio, References, Writing Sample, Work Sample, Assessment / Test, Transcript, Background Check, Video Introduction, LinkedIn Profile, GitHub Profile, Personal Website),
 tags (array of 3-5 short lowercase keywords).
 workMode must be one of: Remote, Hybrid, On-site, Flexible, or empty string.
 jobType must be one of: Full-time, Part-time, Contract, Freelance, Internship, Temporary, Volunteer, or empty string.
@@ -136,54 +147,62 @@ ${text}
 JSON only. No markdown fences. No explanation.`;
 }
 
-
-// no API - paste heuristic extraction
+// no-key local fallback
+// Only attempts fields that regex is reliably good at.
+// Intentionally leaves company/role/industry blank rather than guessing badly —
+// a wrong autofilled value is worse than an empty field the user fills themselves.
+// When an API key is present, the LLM path handles all of this with far higher quality.
 function extractFromPaste(text) {
-    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+    // salary: $60k, £40,000, €50k–€70k/yr, $40/hr, etc.
+    const salaryMatch = text.match(
+        /[\$£€]\s*[\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?\s*[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i
+    );
 
-    const companyMatch = text.match(/(?:at|@|About|Company:?)\s+([A-Z][A-Za-z0-9\s&.,'-]{1,40})/);
-
-    // extract just the matched role keyword + any adjacent qualifier words
-    const rolePattern = /(?:(?:senior|junior|lead|staff|principal|mid|associate|entry.?level)\s+)?(?:software\s+)?(?:Engineer|Designer|Manager|Director|Analyst|Coordinator|Developer|Specialist|Lead|Officer|Associate|Consultant|Advisor|Writer|Editor|Nurse|Teacher|Therapist|Architect|Scientist|Producer|Recruiter|Assistant|Administrator|Representative|Technician)(?:\s+(?:II|III|IV|I|Manager|Lead))?/i;
-    const roleMatch = text.match(rolePattern);
-    const role = roleMatch?.[0]?.trim() ?? "";
-
-    const salaryMatch = text.match(/[\$£€][\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i);
-
-    const locationMatch = text.match(/(?:Location|Based in|Office)[:.]?\s*([A-Z][A-Za-z\s,]+(?:,\s*[A-Z]{2})?)/);
+    // location: explicit label first, then city+state pattern as fallback
+    const locationMatch =
+        text.match(/(?:^|\n)\s*(?:Location|Based in|Office location|Location:|City)[:\s–-]+([^\n]{3,60})/im) ??
+        text.match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?,\s*[A-Z]{2})\b/);
 
     const workMode =
-        /\bremote\b/i.test(text) ? "Remote" :
-        /\bhybrid\b/i.test(text) ? "Hybrid" :
-        /\bon.?site\b|\bin.?office\b/i.test(text) ? "On-site" : "";
+        /\bfully[- ]remote\b|\b100%\s*remote\b|\bremote[- ]first\b/i.test(text) ? "Remote" :
+        /\bremote\b/i.test(text) && /\boffice\b|\bon[- ]?site\b/i.test(text)    ? "Hybrid" :
+        /\bremote\b/i.test(text)                                                 ? "Remote" :
+        /\bhybrid\b/i.test(text)                                                 ? "Hybrid" :
+        /\bon[- ]?site\b|\bin[- ]?office\b|\bin the office\b/i.test(text)        ? "On-site" :
+        /\bflexible\s+(?:work|location|hours|arrangement)\b/i.test(text)         ? "Flexible" : "";
 
     const jobType =
-        /\bfull.?time\b/i.test(text) ? "Full-time" :
-        /\bpart.?time\b/i.test(text) ? "Part-time" :
-        /\bcontract\b/i.test(text) ? "Contract" :
-        /\bfreelance\b/i.test(text) ? "Freelance" :
-        /\binternship\b/i.test(text) ? "Internship" : "";
+        /\bfull[.\s-]?time\b/i.test(text)          ? "Full-time" :
+        /\bpart[.\s-]?time\b/i.test(text)           ? "Part-time" :
+        /\bcontract(?:\s+role|\s+position)?\b/i.test(text) ? "Contract" :
+        /\bfreelance\b/i.test(text)                 ? "Freelance" :
+        /\binternship\b|\bintern\b/i.test(text)     ? "Internship" :
+        /\btemporary\b|\btemp\b/i.test(text)        ? "Temporary" :
+        /\bvolunteer\b/i.test(text)                 ? "Volunteer" : "";
 
     const reqMap = {
-        "Resume / CV":          /\bresume\b|\bcv\b|\bcurriculum vitae\b/i,
-        "Cover Letter":         /\bcover letter\b/i,
-        "Portfolio":            /\bportfolio\b/i,
-        "References":           /\breferences?\b/i,
-        "Writing Sample":       /\bwriting sample\b/i,
-        "Work Sample":          /\bwork sample\b/i,
-        "Assessment / Test":    /\bassessment\b|\btest\b|\btake.?home\b/i,
-        "Transcript":           /\btranscript\b/i,
-        "Background Check":     /\bbackground check\b/i,
+        "Resume / CV":       /\bresume\b|\bcv\b|\bcurriculum vitae\b/i,
+        "Cover Letter":      /\bcover letter\b/i,
+        "Portfolio":         /\bportfolio\b/i,
+        "References":        /\breferences?\b/i,
+        "Writing Sample":    /\bwriting sample\b/i,
+        "Work Sample":       /\bwork sample\b/i,
+        "Assessment / Test": /\bassessment\b|\btake[- ]?home\s*(test|project|assignment)\b/i,
+        "Transcript":        /\btranscript\b/i,
+        "Background Check":  /\bbackground check\b/i,
+        "LinkedIn Profile":  /\blinkedin\b/i,
+        "GitHub Profile":    /\bgithub\b/i,
+        "Personal Website":  /\bpersonal\s+(?:website|site)\b/i,
     };
 
     return {
-        company:      companyMatch?.[1]?.trim() ?? "",
-        role,
+        company:      "",   // too error-prone without LLM - left blank intentionally
+        role:         "",   // too error-prone without LLM - left blank intentionally
         location:     locationMatch?.[1]?.trim() ?? "",
         workMode,
         jobType,
         industry:     "",
-        salary:       salaryMatch?.[0]?.trim() ?? "",
+        salary:       salaryMatch?.[0]?.trim().replace(/\s+/g, " ") ?? "",
         description:  text.slice(0, 2000),
         requirements: Object.entries(reqMap).filter(([, re]) => re.test(text)).map(([l]) => l),
         tags:         [],
@@ -193,22 +212,22 @@ function extractFromPaste(text) {
 
 // apply extracted fields to form, preserving any user-typed values
 function mergeExtracted(form, extracted, sourceUrl) {
-    // FIX: renamed inner param to avoid shadowing outer `form` object.
-    // `pick(a, b)` returns a if truthy, else b - prefers extracted over existing.
-    const pick = (extracted, existing) => extracted || existing;
+    // pick prefers the extracted value over the existing form value
+    const pick = (extractedVal, existingVal) => extractedVal || existingVal;
     return {
         ...form,
         // if autofilled from a URL, populate the url field too
         ...(sourceUrl ? { url: sourceUrl } : {}),
-        company:     pick(extracted.company,     form.company),
-        role:        pick(extracted.role,        form.role),
-        location:    pick(extracted.location,    form.location),
-        workMode:    pick(extracted.workMode,    form.workMode),
-        jobType:     pick(extracted.jobType,     form.jobType),
-        industry:    pick(extracted.industry,    form.industry),
-        salary:      pick(extracted.salary,      form.salary),
-        description: pick(extracted.description, form.description),
+        company:      pick(extracted.company,     form.company),
+        role:         pick(extracted.role,         form.role),
+        location:     pick(extracted.location,     form.location),
+        workMode:     pick(extracted.workMode,     form.workMode),
+        jobType:      pick(extracted.jobType,      form.jobType),
+        industry:     pick(extracted.industry,     form.industry),
+        salary:       pick(extracted.salary,       form.salary),
+        description:  pick(extracted.description,  form.description),
         requirements: extracted.requirements?.length ? extracted.requirements : form.requirements,
+        // defensive: LLM can occasionally return tags as a plain string
         tags: Array.isArray(extracted.tags) && extracted.tags.length
             ? extracted.tags.join(", ")
             : typeof extracted.tags === "string" && extracted.tags
@@ -483,12 +502,10 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
     const [autofillSuccess, setAutofillSuccess] = useState(false);
 
     // read API keys from localStorage (Settings)
-    const openrouterKey = localStorage.getItem("sprout_or_key") ?? "";
-    const geminiKey     = localStorage.getItem("sprout_gemini_key") ?? "";
-    const hasKey        = !!(openrouterKey || geminiKey);
-    const activeKeyLabel = openrouterKey
-        ? "OpenRouter"
-        : geminiKey ? "Gemini" : null;
+    const openrouterKey  = localStorage.getItem("sprout_or_key") ?? "";
+    const geminiKey      = localStorage.getItem("sprout_gemini_key") ?? "";
+    const hasKey         = !!(openrouterKey || geminiKey);
+    const activeKeyLabel = openrouterKey ? "OpenRouter" : geminiKey ? "Gemini" : null;
 
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
@@ -534,7 +551,9 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                 if (activeKey) {
                     extracted = await callLLM(cleanPastedText(autofillText), activeKey.provider, activeKey.key);
                 } else {
-                    // no key - local heuristic
+                    // no key - local heuristic. Only fills what regex is reliable for
+                    // (work mode, job type, salary, requirements, description).
+                    // Company/role intentionally left blank to avoid bad guesses.
                     extracted = extractFromPaste(autofillText);
                 }
             } else {
@@ -542,7 +561,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                 if (!autofillUrl.trim()) throw new Error("Please enter a URL.");
                 if (!activeKey) throw new Error("An API key is needed to autofill from a URL. Add an OpenRouter or Gemini key in Settings, or paste the description instead.");
                 const pageText = await fetchUrlViaJina(autofillUrl.trim());
-                // FIX: guard against Jina returning empty content (blocked pages, paywalls, etc.)
+                // FIX: guard against Jina returning empty content (blocked pages, paywalls, login walls, Workday, Greenhouse, etc.)
                 if (!pageText?.trim()) throw new Error("Couldn't read that page — it may be behind a login or block scrapers. Try pasting the description instead.");
                 extracted = await callLLM(pageText, activeKey.provider, activeKey.key);
             }
@@ -622,7 +641,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                         <p style={{ margin: "5px 0 0", fontSize: 12, color: "var(--text-tertiary)" }}>
                             {hasKey
                                 ? "AI will extract all fields. Boilerplate is stripped automatically."
-                                : "No key needed — Sprout parses this locally. Add a key in Settings for smarter extraction."}
+                                : "No key needed — Sprout fills what it can locally. Add a free OpenRouter key in Settings for full extraction."}
                         </p>
                     </div>
                 )}
@@ -640,7 +659,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                     <span style={{ color: hasKey ? "var(--success)" : "var(--text-tertiary)", fontWeight: hasKey ? 600 : 400 }}>
                         {hasKey
                             ? `✓ ${activeKeyLabel} key active`
-                            : "⚠ No key — using local parser for paste mode"}
+                            : "⚠ No key — partial fill only (work mode, job type, salary)"}
                     </span>
                     <a
                         href="#settings"
