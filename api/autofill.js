@@ -111,7 +111,7 @@ export default async function handler(req, res) {
                         "Authorization": `Bearer ${apiKey}`,
                     },
                     body: JSON.stringify({
-                        // llama-3.3-70b: stable, consistently available free model, clean JSON output, no thinking tokens.
+                        // llama-3.3-70b: stable free model, clean JSON output, no thinking tokens
                         model: "meta-llama/llama-3.3-70b-instruct:free",
                         messages: [{ role: "user", content: prompt }],
                         temperature: 0.1,
@@ -124,9 +124,9 @@ export default async function handler(req, res) {
                     return res.status(r.status).json({ error: providerData?.error?.message ?? `OpenRouter error ${r.status}.` });
                 }
             } else {
-                // Gemini direct
+                // gemini-2.0-flash-lite: 30 RPM / 1500 RPD free tier
                 const r = await fetch(
-                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
                     {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },

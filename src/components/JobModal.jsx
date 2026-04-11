@@ -5,7 +5,7 @@ import {
     btnStyle,
 } from "../store.js";
 
-const IS_DEV = import.meta.env.DEV;
+const IS_DEV = import.meta.env.DEV && !import.meta.env.VITE_USE_SERVERLESS;
 
 // text cleaning before sending to LLM
 function cleanPastedText(raw) {
@@ -70,7 +70,20 @@ function parseJSON(raw) {
     return JSON.parse(clean.slice(start, end + 1));
 }
 
-// single-provider fetch (dev, direct to provider API)
+// classify 429 body: 
+// "transient" = upstream overload, retry after a short delay
+// "exhausted" = daily/project quota gone, don't bother retrying today
+function classify429(body) {
+    const raw = JSON.stringify(body).toLowerCase();
+    // Gemini RESOURCE_EXHAUSTED with limit:0 = hard quota exhausted
+    if (raw.includes("resource_exhausted") || raw.includes("limit: 0") || raw.includes("limit\":0")) return "exhausted";
+    // OpenRouter "temporarily rate-limited upstream" = transient Venice/provider overload
+    if (raw.includes("temporarily") || raw.includes("retry shortly")) return "transient";
+    // default: treat as transient so we at least try the other provider
+    return "transient";
+}
+
+// single-provider fetch (dev, prod goes through /api/autofill)
 async function fetchFromOpenRouter(text, apiKey) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -86,18 +99,22 @@ async function fetchFromOpenRouter(text, apiKey) {
             max_tokens: 1024,
         }),
     });
-    if (res.status === 429) throw Object.assign(new Error("rate_limit"), { isRateLimit: true, provider: "openrouter" });
+
+    const body = await res.json().catch(() => ({}));
+    console.log(`[autofill] OpenRouter ${res.status}:`, body);
+
     if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error?.message ?? `OpenRouter error ${res.status}. Check your API key in Settings.`);
+        const msg = body?.error?.message ?? body?.error?.metadata?.raw ?? `OpenRouter error ${res.status}`;
+        const kind = res.status === 429 ? classify429(body) : "error";
+        throw Object.assign(new Error(msg), { is429: res.status === 429, kind });
     }
-    const data = await res.json();
-    return parseJSON(data.choices?.[0]?.message?.content ?? "");
+    return parseJSON(body.choices?.[0]?.message?.content ?? "");
 }
 
 async function fetchFromGemini(text, apiKey) {
+    // gemini-2.0-flash-lite: 30 RPM / 1500 RPD free tier
     const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
         {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -107,16 +124,22 @@ async function fetchFromGemini(text, apiKey) {
             }),
         }
     );
-    if (res.status === 429) throw Object.assign(new Error("rate_limit"), { isRateLimit: true, provider: "gemini" });
+
+    const body = await res.json().catch(() => ({}));
+    console.log(`[autofill] Gemini ${res.status}:`, body);
+
     if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error?.message ?? `Gemini error ${res.status}. Check your API key in Settings.`);
+        const msg = body?.error?.message ?? `Gemini error ${res.status}`;
+        const kind = res.status === 429 ? classify429(body) : "error";
+        throw Object.assign(new Error(msg), { is429: res.status === 429, kind });
     }
-    const data = await res.json();
-    return parseJSON(data.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
+    return parseJSON(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
 }
 
 // callLLM - tries both providers, Gemini falls back to OpenRouter on 429
+// Transient 429 (upstream overload): silently fall back to the other provider
+// Exhausted 429 (daily quota gone): skip that provider, try the other
+// both exhausted/failed: surface a clear, actionable message
 async function callLLM(text, provider, apiKey, allKeys) {
     if (IS_DEV) {
         const orKey     = allKeys?.openrouter ?? "";
@@ -129,8 +152,9 @@ async function callLLM(text, provider, apiKey, allKeys) {
                 console.log("[autofill] fields from Gemini:", fields);
                 return fields;
             } catch (err) {
-                if (!err.isRateLimit) throw err;
-                console.warn("[autofill] Gemini 429 — falling back to OpenRouter");
+                if (!err.is429) throw err; // real error - surface it immediately
+                console.warn(`[autofill] Gemini 429 (${err.kind}) — trying OpenRouter`);
+                // fall through regardless of transient vs exhausted - OR may still work
             }
         }
 
@@ -140,12 +164,15 @@ async function callLLM(text, provider, apiKey, allKeys) {
                 console.log("[autofill] fields from OpenRouter:", fields);
                 return fields;
             } catch (err) {
-                if (!err.isRateLimit) throw err;
-                console.warn("[autofill] OpenRouter 429 — both providers rate limited");
+                if (!err.is429) throw err; // real error - surface it immediately
+                console.warn(`[autofill] OpenRouter 429 (${err.kind}) — both exhausted`);
             }
         }
 
-        throw new Error("Both providers are rate limited right now. Wait a moment and try again, or switch to paste mode.");
+        // both failed message
+        throw new Error(
+            "Both AI providers are unavailable right now (quota limits). "
+        );
     }
 
     // prod: route through serverless - response is already unified { fields }
@@ -183,7 +210,6 @@ JSON only. No markdown fences. No explanation.`;
 // a wrong autofilled value is worse than an empty field the user fills themselves.
 // When an API key is present, the LLM path handles all of this with far higher quality.
 function extractFromPaste(text) {
-    // salary: $60k, £40,000, €50k–€70k/yr, $40/hr, etc.
     const salaryMatch = text.match(
         /[\$£€]\s*[\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?\s*[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i
     );
