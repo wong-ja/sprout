@@ -299,7 +299,7 @@ function KeyField({ id, label, badge, placeholder, helpUrl, helpLabel, value, sh
                     color: hasValue ? "var(--success)" : "var(--text-tertiary)",
                     border: `1px solid ${hasValue ? "var(--success)" : "var(--border-subtle)"}`,
                 }}>
-                    {hasValue ? "✓ key saved" : badge}
+                    {/* {hasValue ? "✓ key saved" : badge} */}
                 </span>
             </div>
             <div style={{ display: "flex", gap: 6 }}>
