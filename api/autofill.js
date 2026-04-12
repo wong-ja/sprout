@@ -51,6 +51,54 @@ function extractFieldsFromProvider(data, provider) {
 }
 
 
+// try OpenRouter - returns { fields } on success, throws { is429, message } on failure
+async function tryOpenRouter(text, apiKey) {
+    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+            // llama-3.3-70b: stable free model, clean JSON output, no thinking tokens
+            model: "meta-llama/llama-3.3-70b-instruct:free",
+            messages: [{ role: "user", content: buildPrompt(text) }],
+            temperature: 0.1,
+            max_tokens: 1024,
+        }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+        const msg = data?.error?.metadata?.raw ?? data?.error?.message ?? `OpenRouter error ${r.status}`;
+        throw Object.assign(new Error(msg), { is429: r.status === 429 });
+    }
+    return extractFieldsFromProvider(data, "openrouter");
+}
+
+
+// try Gemini - returns { fields } on success, throws { is429, message } on failure
+async function tryGemini(text, apiKey) {
+    // gemini-2.0-flash-lite: separate quota pool, 30 RPM / 1500 RPD free tier
+    const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: buildPrompt(text) }] }],
+                generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
+            }),
+        }
+    );
+    const data = await r.json();
+    if (!r.ok) {
+        const msg = data?.error?.message ?? `Gemini error ${r.status}`;
+        throw Object.assign(new Error(msg), { is429: r.status === 429 });
+    }
+    return extractFieldsFromProvider(data, "gemini");
+}
+
+
 export default async function handler(req, res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -62,7 +110,7 @@ export default async function handler(req, res) {
     try { body = await parseBody(req); }
     catch (err) { return res.status(400).json({ error: err.message }); }
 
-    const { mode, url, text, provider, userApiKey } = body;
+    const { mode, url, text, userOrKey, userGeminiKey } = body;
 
     // fetch-url: proxy through jina reader
     if (mode === "fetch-url") {
@@ -81,78 +129,54 @@ export default async function handler(req, res) {
         }
     }
 
-    // extract: LLM field extraction to unified { fields } response
+    // extract: try providers in order, fall back automatically on 429
     if (mode === "extract") {
         if (!text) return res.status(400).json({ error: "Missing text." });
 
-        const useProvider = provider ?? "openrouter";
-        // prefer server-side env key ; fall back to user-supplied key
-        // NOTE: userApiKey is never logged
-        const apiKey = useProvider === "openrouter"
-            ? (process.env.OPENROUTER_KEY || userApiKey || "")
-            : (process.env.GEMINI_API_KEY  || userApiKey || "");
+        const orKey     = process.env.OPENROUTER_KEY || userOrKey || "";
+        const geminiKey = process.env.GEMINI_API_KEY  || userGeminiKey || "";
 
-        if (!apiKey) {
+        if (!orKey && !geminiKey) {
             return res.status(400).json({
                 error: "No API key available. Add your free OpenRouter or Gemini key in Settings.",
             });
         }
 
-        const prompt = buildPrompt(text);
+        const errors = [];
 
-        try {
-            let providerData;
-            // Openrouter
-            if (useProvider === "openrouter") {
-                const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${apiKey}`,
-                    },
-                    body: JSON.stringify({
-                        // llama-3.3-70b: stable free model, clean JSON output, no thinking tokens
-                        model: "meta-llama/llama-3.3-70b-instruct:free",
-                        messages: [{ role: "user", content: prompt }],
-                        temperature: 0.1,
-                        max_tokens: 1024,
-                    }),
-                });
-                providerData = await r.json();
-                if (!r.ok) {
-                    if (r.status === 429) return res.status(429).json({ error: "OpenRouter rate limit reached. Wait a moment and try again." });
-                    return res.status(r.status).json({ error: providerData?.error?.message ?? `OpenRouter error ${r.status}.` });
+        // try OpenRouter first
+        if (orKey) {
+            try {
+                const fields = await tryOpenRouter(text, orKey);
+                return res.status(200).json({ fields });
+            } catch (err) {
+                errors.push(`OpenRouter: ${err.message}`);
+                if (!err.is429) {
+                    // non-429 error (bad key, malformed response, etc.) - surface it directly
+                    return res.status(500).json({ error: err.message });
                 }
-            } else {
-                // gemini-2.0-flash-lite: 30 RPM / 1500 RPD free tier
-                const r = await fetch(
-                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
-                    {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            contents: [{ parts: [{ text: prompt }] }],
-                            generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
-                        }),
-                    }
-                );
-                providerData = await r.json();
-                if (!r.ok) {
-                    if (r.status === 429) return res.status(429).json({ error: "Gemini rate limit reached. Switch to OpenRouter for more generous free limits." });
-                    if (r.status === 400) return res.status(400).json({ error: "Text too long for Gemini. Try pasting a shorter excerpt." });
-                    return res.status(r.status).json({ error: providerData?.error?.message ?? `Gemini error ${r.status}.` });
-                }
+                // 429 - fall through to Gemini
             }
-
-            const fields = extractFieldsFromProvider(providerData, useProvider);
-            return res.status(200).json({ fields });
-
-        } catch (err) {
-            if (err instanceof SyntaxError) {
-                return res.status(422).json({ error: `AI returned unparseable output: ${err.message}` });
-            }
-            return res.status(500).json({ error: err.message });
         }
+
+        // fall back to Gemini
+        if (geminiKey) {
+            try {
+                const fields = await tryGemini(text, geminiKey);
+                return res.status(200).json({ fields });
+            } catch (err) {
+                errors.push(`Gemini: ${err.message}`);
+                if (!err.is429) {
+                    return res.status(500).json({ error: err.message });
+                }
+                // both 429 - fall through to error response
+            }
+        }
+
+        // both providers exhausted
+        return res.status(429).json({
+            error: "Both AI providers are rate limited right now. Free tiers reset daily — try again later, or paste the description and use local fill instead.",
+        });
     }
 
     return res.status(400).json({ error: "Invalid mode. Expected 'fetch-url' or 'extract'." });

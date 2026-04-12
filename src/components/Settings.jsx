@@ -293,14 +293,14 @@ function KeyField({ id, label, badge, placeholder, helpUrl, helpLabel, value, sh
                 <label htmlFor={id} style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", fontFamily: "var(--font-sans)" }}>
                     {label}
                 </label>
-                <span style={{
+                {/* <span style={{
                     fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 99,
                     background: hasValue ? "var(--success-bg)" : "var(--bg-subtle)",
                     color: hasValue ? "var(--success)" : "var(--text-tertiary)",
                     border: `1px solid ${hasValue ? "var(--success)" : "var(--border-subtle)"}`,
                 }}>
-                    {/* {hasValue ? "✓ key saved" : badge} */}
-                </span>
+                    {hasValue ? "✓ key saved" : badge}
+                </span> */}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
                 <input

@@ -70,7 +70,7 @@ function parseJSON(raw) {
     return JSON.parse(clean.slice(start, end + 1));
 }
 
-// classify 429 body: 
+// classify 429 body:
 // "transient" = upstream overload, retry after a short delay
 // "exhausted" = daily/project quota gone, don't bother retrying today
 function classify429(body) {
@@ -136,25 +136,23 @@ async function fetchFromGemini(text, apiKey) {
     return parseJSON(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
 }
 
-// callLLM - tries both providers, Gemini falls back to OpenRouter on 429
-// Transient 429 (upstream overload): silently fall back to the other provider
-// Exhausted 429 (daily quota gone): skip that provider, try the other
-// both exhausted/failed: surface a clear, actionable message
-async function callLLM(text, provider, apiKey, allKeys) {
+// callLLM - tries both providers, falls back automatically on 429
+// Dev: calls providers directly (IS_DEV=true), tries Gemini then OpenRouter
+// Prod: routes through /api/autofill which handles fallback server-side
+async function callLLM(text, allKeys) {
     if (IS_DEV) {
         const orKey     = allKeys?.openrouter ?? "";
         const geminiKey = allKeys?.gemini ?? "";
 
-        // Gemini
+        // try Gemini first in dev
         if (geminiKey) {
             try {
                 const fields = await fetchFromGemini(text, geminiKey);
                 console.log("[autofill] fields from Gemini:", fields);
                 return fields;
             } catch (err) {
-                if (!err.is429) throw err; // real error - surface it immediately
+                if (!err.is429) throw err;
                 console.warn(`[autofill] Gemini 429 (${err.kind}) — trying OpenRouter`);
-                // fall through regardless of transient vs exhausted - OR may still work
             }
         }
 
@@ -164,22 +162,27 @@ async function callLLM(text, provider, apiKey, allKeys) {
                 console.log("[autofill] fields from OpenRouter:", fields);
                 return fields;
             } catch (err) {
-                if (!err.is429) throw err; // real error - surface it immediately
+                if (!err.is429) throw err;
                 console.warn(`[autofill] OpenRouter 429 (${err.kind}) — both exhausted`);
             }
         }
 
         // both failed message
         throw new Error(
-            "Both AI providers are unavailable right now (quota limits). "
+            "Both AI providers are unavailable right now (quota limits)."
         );
     }
 
-    // prod: route through serverless - response is already unified { fields }
+    // prod: send both keys over HTTPS (npt logged server-side) - server tries OpenRouter first, falls back to Gemini
     const res = await fetch("/api/autofill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "extract", text, provider, userApiKey: apiKey }),
+        body: JSON.stringify({
+            mode: "extract",
+            text,
+            userOrKey:     allKeys?.openrouter ?? "",
+            userGeminiKey: allKeys?.gemini     ?? "",
+        }),
     });
     const data = await res.json().catch(() => { throw new Error("Server returned an unreadable response."); });
     if (!res.ok) throw new Error(data?.error ?? `Server error ${res.status}`);
@@ -228,13 +231,13 @@ function extractFromPaste(text) {
         /\bflexible\s+(?:work|location|hours|arrangement)\b/i.test(text)         ? "Flexible" : "";
 
     const jobType =
-        /\bfull[.\s-]?time\b/i.test(text)          ? "Full-time" :
-        /\bpart[.\s-]?time\b/i.test(text)           ? "Part-time" :
-        /\bcontract(?:\s+role|\s+position)?\b/i.test(text) ? "Contract" :
-        /\bfreelance\b/i.test(text)                 ? "Freelance" :
-        /\binternship\b|\bintern\b/i.test(text)     ? "Internship" :
-        /\btemporary\b|\btemp\b/i.test(text)        ? "Temporary" :
-        /\bvolunteer\b/i.test(text)                 ? "Volunteer" : "";
+        /\bfull[.\s-]?time\b/i.test(text)                  ? "Full-time" :
+        /\bpart[.\s-]?time\b/i.test(text)                  ? "Part-time" :
+        /\bcontract(?:\s+role|\s+position)?\b/i.test(text) ? "Contract"  :
+        /\bfreelance\b/i.test(text)                        ? "Freelance" :
+        /\binternship\b|\bintern\b/i.test(text)            ? "Internship":
+        /\btemporary\b|\btemp\b/i.test(text)               ? "Temporary" :
+        /\bvolunteer\b/i.test(text)                        ? "Volunteer" : "";
 
     const reqMap = {
         "Resume / CV":       /\bresume\b|\bcv\b|\bcurriculum vitae\b/i,
@@ -586,12 +589,6 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
         onSubmit({ ...form, tags });
     };
 
-    const getActiveKey = () => {
-        if (openrouterKey) return { provider: "openrouter", key: openrouterKey };
-        if (geminiKey)     return { provider: "gemini",     key: geminiKey };
-        return null;
-    };
-
     const handleAutofill = async () => {
         setAutofilling(true);
         setAutofillError("");
@@ -599,15 +596,15 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
 
         try {
             let extracted;
-            const activeKey = getActiveKey();
-            // pass both keys so callLLM can fall back between providers on 429
+            // both keys passed - server (or dev fallback) decides which to use
             const allKeys = { openrouter: openrouterKey, gemini: geminiKey };
+            const hasAnyKey = !!(openrouterKey || geminiKey);
 
             if (autofillMode === "paste") {
                 // PASTE mode
                 if (!autofillText.trim()) throw new Error("Please paste the job description first.");
-                if (activeKey) {
-                    extracted = await callLLM(cleanPastedText(autofillText), activeKey.provider, activeKey.key, allKeys);
+                if (hasAnyKey) {
+                    extracted = await callLLM(cleanPastedText(autofillText), allKeys);
                 } else {
                     // no key - local heuristic. Only fills what regex is reliable for
                     // (work mode, job type, salary, requirements, description).
@@ -617,11 +614,11 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
             } else {
                 // URL mode - needs a key
                 if (!autofillUrl.trim()) throw new Error("Please enter a URL.");
-                if (!activeKey) throw new Error("An API key is needed to autofill from a URL. Add an OpenRouter or Gemini key in Settings, or paste the description instead.");
+                if (!hasAnyKey) throw new Error("An API key is needed to autofill from a URL. Add an OpenRouter or Gemini key in Settings, or paste the description instead.");
                 const pageText = await fetchUrlViaJina(autofillUrl.trim());
-                // FIX: guard against Jina returning empty content (blocked pages, paywalls, login walls, Workday, Greenhouse, etc.)
+                // guard against Jina returning empty content (login walls, Workday, Greenhouse, etc.)
                 if (!pageText?.trim()) throw new Error("Couldn't read that page — it may be behind a login or block scrapers. Try pasting the description instead.");
-                extracted = await callLLM(pageText, activeKey.provider, activeKey.key, allKeys);
+                extracted = await callLLM(pageText, allKeys);
             }
 
             // DEBUG
