@@ -1,4 +1,5 @@
 // autofill serverless function (Vercel)
+// jina fetch + structured parser, LLM extraction with user key (optional)
 
 function parseBody(req) {
     return new Promise((resolve, reject) => {
@@ -14,6 +15,256 @@ function parseBody(req) {
 }
 
 
+// structured job posting parser (text/markdown)
+function parseJobPosting(text) {
+    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+    // title / role (first H1/H2 in md)
+    let role = "";
+    for (const line of lines) {
+        // skip lines that look like nav, labels, or boilerplate
+        if (/^(apply|share|back|jobs? at|posted|department|location|employment|compensation|overview|about|benefits?|why|what|how|you|we|our|the)\b/i.test(line)) continue;
+        if (line.length < 3 || line.length > 120) continue;
+        // markdown heading
+        const headingMatch = line.match(/^#{1,3}\s+(.+)/);
+        if (headingMatch) { role = headingMatch[1].trim(); break; }
+        // plain first line that looks like a job title
+        if (/[A-Z]/.test(line[0]) && !/[.?!]$/.test(line)) { role = line; break; }
+    }
+
+    // label:value extraction, handles:
+    //   1. "Label\nValue" (Ashby, Greenhouse, etc)
+    //   2. "Label: Value" or "**Label:** Value" (markdown inline)
+    //   3. Structured markdown tables
+
+    const labelMap = {};
+
+    // format 1: label on one line, value on the next
+    // detect lines that are short labels (≤4 words, no sentence punctuation)
+    const KNOWN_LABELS = [
+        "location", "employment type", "job type", "location type", "work type",
+        "work location", "workplace", "remote", "department", "team",
+        "compensation", "salary", "pay", "rate", "compensation range",
+        "company", "organization", "employer",
+        "level", "seniority", "experience level",
+        "industry", "sector",
+        "posted", "deadline", "closing date",
+    ];
+
+    for (let i = 0; i < lines.length - 1; i++) {
+        const line = lines[i].toLowerCase().replace(/[*_:#]/g, "").trim();
+        const next = lines[i + 1];
+        if (KNOWN_LABELS.some(l => line === l || line.startsWith(l)) && next.length < 120) {
+            labelMap[line] = next;
+        }
+    }
+
+    // format 2: inline "Label: Value" or "**Label:** Value"
+    for (const line of lines) {
+        const m = line.match(/^\*{0,2}([A-Za-z ]{2,30})\*{0,2}\s*[:\-–]\s*(.+)/);
+        if (m) {
+            const key = m[1].toLowerCase().trim();
+            const val = m[2].replace(/\*+/g, "").trim();
+            if (!labelMap[key]) labelMap[key] = val;
+        }
+    }
+
+    // extract each field
+
+    // company: look for "at Company", "jobs at X", "Company:" patterns, or page title suffix
+    let company = "";
+    const companyPatterns = [
+        text.match(/\bjobs?\s+at\s+([A-Z][A-Za-z0-9\s&.,'-]{1,40}?)(?:\s*[|\-–]|\n|$)/i),
+        text.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'-]{1,40}?)\s*(?:is|are|we|–|-|\||\n)/i),
+        text.match(/powered by\s+\n+([A-Z][A-Za-z0-9\s&.'-]{1,40})/i),
+    ];
+    // also check labelMap
+    const companyLabel = labelMap["company"] || labelMap["organization"] || labelMap["employer"] || labelMap["company name"] || "";
+    if (companyLabel) {
+        company = companyLabel;
+    } else {
+        for (const m of companyPatterns) {
+            if (m?.[1]?.trim()) { company = m[1].trim(); break; }
+        }
+    }
+    // style: often appears in the URL path or page title, fall back to first bold/heading that isn't the role
+    if (!company) {
+        const boldMatch = text.match(/\*\*([A-Z][A-Za-z0-9\s&.'-]{2,40})\*\*/);
+        if (boldMatch && boldMatch[1].trim() !== role) company = boldMatch[1].trim();
+    }
+
+    // location
+    const locationRaw =
+        labelMap["location"] ||
+        labelMap["work location"] ||
+        labelMap["office location"] ||
+        labelMap["city"] ||
+        "";
+    // clean up "location type" contamination
+    const location = locationRaw
+        .replace(/\b(remote|hybrid|on-?site|flexible)\b/gi, "")
+        .replace(/\s+/g, " ").trim();
+
+    // workMode: check labelMap["location type"] first, then scan full text
+    const locationTypeRaw = (
+        labelMap["location type"] ||
+        labelMap["workplace"] ||
+        labelMap["work type"] ||
+        labelMap["remote"] ||
+        ""
+    ).toLowerCase();
+
+    let workMode = "";
+    if (/remote/i.test(locationTypeRaw) && /on.?site|office|hybrid/i.test(locationTypeRaw)) workMode = "Hybrid";
+    else if (/remote/i.test(locationTypeRaw)) workMode = "Remote";
+    else if (/hybrid/i.test(locationTypeRaw)) workMode = "Hybrid";
+    else if (/on.?site|in.?office|in.?person/i.test(locationTypeRaw)) workMode = "On-site";
+    else if (/flexible/i.test(locationTypeRaw)) workMode = "Flexible";
+    // fall back to full-text scan
+    if (!workMode) {
+        if (/\bfully[- ]remote\b|\b100%\s*remote\b|\bremote[- ]first\b/i.test(text)) workMode = "Remote";
+        else if (/\bremote\b/i.test(text) && /\boffice\b|\bon[- ]?site\b/i.test(text)) workMode = "Hybrid";
+        else if (/\bremote\b/i.test(text)) workMode = "Remote";
+        else if (/\bhybrid\b/i.test(text)) workMode = "Hybrid";
+        else if (/\bon[- ]?site\b|\bin[- ]?office\b/i.test(text)) workMode = "On-site";
+        else if (/\bflexible\s+(?:work|location|hours)\b/i.test(text)) workMode = "Flexible";
+    }
+
+    // jobType: check labelMap first
+    const jobTypeRaw = (
+        labelMap["employment type"] ||
+        labelMap["job type"] ||
+        labelMap["work type"] ||
+        labelMap["type"] ||
+        ""
+    ).toLowerCase();
+
+    let jobType = "";
+    if (/full.?time/i.test(jobTypeRaw)) jobType = "Full-time";
+    else if (/part.?time/i.test(jobTypeRaw)) jobType = "Part-time";
+    else if (/contract/i.test(jobTypeRaw)) jobType = "Contract";
+    else if (/freelance/i.test(jobTypeRaw)) jobType = "Freelance";
+    else if (/internship|intern\b/i.test(jobTypeRaw)) jobType = "Internship";
+    else if (/temporary|temp\b/i.test(jobTypeRaw)) jobType = "Temporary";
+    else if (/volunteer/i.test(jobTypeRaw)) jobType = "Volunteer";
+    // fall back to full-text scan
+    if (!jobType) {
+        if (/\bfull[.\s-]?time\b/i.test(text)) jobType = "Full-time";
+        else if (/\bpart[.\s-]?time\b/i.test(text)) jobType = "Part-time";
+        else if (/\bcontract\b/i.test(text)) jobType = "Contract";
+        else if (/\bfreelance\b/i.test(text)) jobType = "Freelance";
+        else if (/\binternship\b|\bintern\b/i.test(text)) jobType = "Internship";
+        else if (/\btemporary\b|\btemp\b/i.test(text)) jobType = "Temporary";
+        else if (/\bvolunteer\b/i.test(text)) jobType = "Volunteer";
+    }
+
+    // salary: labelMap first, then regex scan
+    const salaryRaw =
+        labelMap["compensation"] ||
+        labelMap["salary"] ||
+        labelMap["pay"] ||
+        labelMap["rate"] ||
+        labelMap["compensation range"] ||
+        "";
+    // clean equity/bonus noise from compensation field
+    const salary = salaryRaw
+        ? salaryRaw.replace(/\s*•\s*offers?\s+equity/gi, "").replace(/\s*•\s*bonus/gi, "").trim()
+        : (text.match(/[\$£€]\s*[\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?\s*[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i)?.[0]?.trim() ?? "");
+
+    // industry: check department label as a proxy, or known industry keywords
+    const deptRaw = labelMap["department"] || labelMap["team"] || labelMap["industry"] || labelMap["sector"] || "";
+    const INDUSTRIES = [
+        "Technology","Healthcare","Finance","Education","Retail","Manufacturing",
+        "Media","Government","Nonprofit","Real Estate","Legal","Marketing",
+        "Consulting","Hospitality","Transportation","Energy","Agriculture",
+        "Construction","Insurance","Pharmaceuticals",
+    ];
+    let industry = "";
+    for (const ind of INDUSTRIES) {
+        if (new RegExp(`\\b${ind}\\b`, "i").test(text)) { industry = ind; break; }
+    }
+    // "health" → Healthcare etc.
+    if (!industry) {
+        if (/\bhealth\b|\bmedical\b|\bclinic\b|\bpsych/i.test(text)) industry = "Healthcare";
+        else if (/\bfintech\b|\bbank\b|\bfinance\b|\binvest/i.test(text)) industry = "Finance";
+        else if (/\bedtech\b|\beducation\b|\blearning\b/i.test(text)) industry = "Education";
+    }
+
+    // requirements: scan for known document requirements
+    const reqMap = {
+        "Resume / CV":       /\bresume\b|\bcv\b|\bcurriculum vitae\b/i,
+        "Cover Letter":      /\bcover letter\b/i,
+        "Portfolio":         /\bportfolio\b/i,
+        "References":        /\breferences?\b/i,
+        "Writing Sample":    /\bwriting sample\b/i,
+        "Work Sample":       /\bwork sample\b/i,
+        "Assessment / Test": /\bassessment\b|\btake[- ]?home\s*(test|project|assignment)\b/i,
+        "Transcript":        /\btranscript\b/i,
+        "Background Check":  /\bbackground check\b/i,
+        "LinkedIn Profile":  /\blinkedin\b/i,
+        "GitHub Profile":    /\bgithub\b/i,
+        "Personal Website":  /\bpersonal\s+(?:website|site)\b/i,
+        "Video Introduction":/\bvideo\s+(?:intro|introduction|cover)\b/i,
+    };
+    const requirements = Object.entries(reqMap)
+        .filter(([, re]) => re.test(text))
+        .map(([l]) => l);
+
+    // tags: derive from role + industry + key signals
+    const tags = [];
+    if (workMode) tags.push(workMode.toLowerCase().replace("-", ""));
+    if (industry) tags.push(industry.toLowerCase());
+    if (/\bstartup\b|\bseries [a-e]\b/i.test(text)) tags.push("startup");
+    if (/\bremote\b/i.test(text)) tags.push("remote");
+    if (/\bequity\b/i.test(text)) tags.push("equity");
+    if (/\bai\b|\bmachine learning\b|\bllm\b/i.test(text)) tags.push("ai");
+    // de-dup and limit to 5
+    const uniqueTags = [...new Set(tags)].slice(0, 5);
+
+    // description: strip boilerplate, take meaningful body
+    const DROP_LINES = [
+        /^apply\s+(for\s+this\s+job|now)/i,
+        /^powered by/i,
+        /^privacy policy/i,
+        /^security$/i,
+        /^vulnerability disclosure/i,
+        /^share\b/i,
+        /^back\b/i,
+    ];
+    const descLines = lines.filter(l => !DROP_LINES.some(re => re.test(l)));
+    // skip the first few lines that we already parsed as structured fields
+    const descStart = descLines.findIndex(l =>
+        /overview|about\s+(the\s+)?(role|job|position|company|us|team)|responsibilities|what you|why you|we'?re\s+looking/i.test(l)
+    );
+    const description = descLines
+        .slice(descStart >= 0 ? descStart : 0)
+        .join("\n")
+        .slice(0, 2000)
+        .trim();
+
+    return {
+        company:      company.slice(0, 100),
+        role:         role.slice(0, 100),
+        location:     location.slice(0, 100),
+        workMode,
+        jobType,
+        industry,
+        salary:       salary.slice(0, 100),
+        description,
+        requirements,
+        tags:         uniqueTags,
+    };
+}
+
+
+// confidence check: returns how many fields were successfully extracted (decides LLM usage)
+function parserConfidence(fields) {
+    const key = ["company", "role", "location", "salary", "workMode", "jobType"];
+    return key.filter(k => fields[k] && fields[k].length > 0).length;
+}
+
+
+// LLM helpers (optional with user API key)
 function buildPrompt(text) {
     return `You are a job listing parser. Extract fields from the job posting below.
 Return ONLY valid JSON with these exact keys (empty string if unknown):
@@ -68,10 +319,10 @@ async function tryOpenRouter(text, apiKey) {
         }),
     });
     const data = await r.json();
-    if (!r.ok) {
-        const msg = data?.error?.metadata?.raw ?? data?.error?.message ?? `OpenRouter error ${r.status}`;
-        throw Object.assign(new Error(msg), { is429: r.status === 429 });
-    }
+    if (!r.ok) throw Object.assign(
+        new Error(data?.error?.metadata?.raw ?? data?.error?.message ?? `OpenRouter error ${r.status}`),
+        { is429: r.status === 429 }
+    );
     return extractFieldsFromProvider(data, "openrouter");
 }
 
@@ -91,11 +342,22 @@ async function tryGemini(text, apiKey) {
         }
     );
     const data = await r.json();
-    if (!r.ok) {
-        const msg = data?.error?.message ?? `Gemini error ${r.status}`;
-        throw Object.assign(new Error(msg), { is429: r.status === 429 });
-    }
+    if (!r.ok) throw Object.assign(
+        new Error(data?.error?.message ?? `Gemini error ${r.status}`),
+        { is429: r.status === 429 }
+    );
     return extractFieldsFromProvider(data, "gemini");
+}
+
+// attempt LLM - silently returns null on any failure so caller can fall back to parser result
+async function tryLLM(text, orKey, geminiKey) {
+    if (orKey) {
+        try { return await tryOpenRouter(text, orKey); } catch (_) {}
+    }
+    if (geminiKey) {
+        try { return await tryGemini(text, geminiKey); } catch (_) {}
+    }
+    return null;
 }
 
 
@@ -133,50 +395,33 @@ export default async function handler(req, res) {
     if (mode === "extract") {
         if (!text) return res.status(400).json({ error: "Missing text." });
 
-        const orKey     = process.env.OPENROUTER_KEY || userOrKey || "";
+        const orKey     = process.env.OPENROUTER_KEY || userOrKey     || "";
         const geminiKey = process.env.GEMINI_API_KEY  || userGeminiKey || "";
 
-        if (!orKey && !geminiKey) {
-            return res.status(400).json({
-                error: "No API key available. Add your free OpenRouter or Gemini key in Settings.",
-            });
+        // always run the structured parser first
+        const parsed = parseJobPosting(text);
+        const confidence = parserConfidence(parsed);
+
+        // if parser extracted most fields (≥3 key fields), return it directly
+        // if parser got fewer than 3 fields AND a key is available, try LLM to fill gaps
+        // always return something, never 429
+        if (confidence >= 3 || (!orKey && !geminiKey)) {
+            return res.status(200).json({ fields: parsed, source: "parser" });
         }
 
-        const errors = [];
-
-        // try OpenRouter first
-        if (orKey) {
-            try {
-                const fields = await tryOpenRouter(text, orKey);
-                return res.status(200).json({ fields });
-            } catch (err) {
-                errors.push(`OpenRouter: ${err.message}`);
-                if (!err.is429) {
-                    // non-429 error (bad key, malformed response, etc.) - surface it directly
-                    return res.status(500).json({ error: err.message });
-                }
-                // 429 - fall through to Gemini
+        // try LLM to improve on low-confidence parse - but don't fail if it errors
+        const llmFields = await tryLLM(text, orKey, geminiKey);
+        if (llmFields) {
+            // merge: prefer LLM values for fields the parser missed, keep parser values otherwise
+            const merged = {};
+            for (const key of Object.keys(parsed)) {
+                merged[key] = llmFields[key] || parsed[key];
             }
+            return res.status(200).json({ fields: merged, source: "llm" });
         }
 
-        // fall back to Gemini
-        if (geminiKey) {
-            try {
-                const fields = await tryGemini(text, geminiKey);
-                return res.status(200).json({ fields });
-            } catch (err) {
-                errors.push(`Gemini: ${err.message}`);
-                if (!err.is429) {
-                    return res.status(500).json({ error: err.message });
-                }
-                // both 429 - fall through to error response
-            }
-        }
-
-        // both providers exhausted
-        return res.status(429).json({
-            error: "Both AI providers are rate limited right now. Free tiers reset daily — try again later, or paste the description and use local fill instead.",
-        });
+        // LLM failed or unavailable - return parser result anyway
+        return res.status(200).json({ fields: parsed, source: "parser" });
     }
 
     return res.status(400).json({ error: "Invalid mode. Expected 'fetch-url' or 'extract'." });

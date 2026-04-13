@@ -7,8 +7,8 @@ import {
 
 const IS_DEV = import.meta.env.DEV && !import.meta.env.VITE_USE_SERVERLESS;
 
-// text cleaning before sending to LLM
-function cleanPastedText(raw) {
+// text cleaning before sending to parser/LLM
+function cleanText(raw) {
     const DROP = [
         /equal opportunity employer/i,
         /eeo statement/i,
@@ -29,7 +29,7 @@ function cleanPastedText(raw) {
     return raw
         .split("\n")
         .map(l => l.trim())
-        .filter(l => l.length > 8)
+        .filter(l => l.length > 2)
         .filter(l => !DROP.some(re => re.test(l)))
         .join("\n")
         .slice(0, 5000);
@@ -55,190 +55,114 @@ async function fetchUrlViaJina(url) {
     return data.text ?? "";
 }
 
-// robust JSON extractor
-function parseJSON(raw) {
-    // 1. strip <think>...</think> reasoning blocks (DeepSeek R1, QwQ, etc.)
-    let clean = raw.replace(/<think>[\s\S]*?<\/think>/gi, "");
-    // 2. strip markdown fences
-    clean = clean.replace(/```json\s*/gi, "").replace(/```\s*/g, "");
-    // 3. find outermost { ... } — handles preamble/postamble text
-    const start = clean.indexOf("{");
-    const end   = clean.lastIndexOf("}");
-    if (start === -1 || end === -1 || end < start) {
-        throw new SyntaxError(`No JSON object found in LLM response. Raw: ${raw.slice(0, 200)}`);
+// client-side structured parser (runs in browser when IS_DEV=true, don't need vercel dev)
+function parseJobPosting(text) {
+    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+    // role: first non-boilerplate line that looks like a title
+    let role = "";
+    for (const line of lines) {
+        if (/^(apply|share|back|jobs? at|posted|department|location|employment|compensation|overview|about|benefits?|why|what|how|powered)\b/i.test(line)) continue;
+        if (line.length < 3 || line.length > 120) continue;
+        const headingMatch = line.match(/^#{1,3}\s+(.+)/);
+        if (headingMatch) { role = headingMatch[1].trim(); break; }
+        if (/[A-Z]/.test(line[0]) && !/[.?!]$/.test(line)) { role = line; break; }
     }
-    return JSON.parse(clean.slice(start, end + 1));
-}
 
-// classify 429 body:
-// "transient" = upstream overload, retry after a short delay
-// "exhausted" = daily/project quota gone, don't bother retrying today
-function classify429(body) {
-    const raw = JSON.stringify(body).toLowerCase();
-    // Gemini RESOURCE_EXHAUSTED with limit:0 = hard quota exhausted
-    if (raw.includes("resource_exhausted") || raw.includes("limit: 0") || raw.includes("limit\":0")) return "exhausted";
-    // OpenRouter "temporarily rate-limited upstream" = transient Venice/provider overload
-    if (raw.includes("temporarily") || raw.includes("retry shortly")) return "transient";
-    // default: treat as transient so we at least try the other provider
-    return "transient";
-}
-
-// single-provider fetch (dev, prod goes through /api/autofill)
-async function fetchFromOpenRouter(text, apiKey) {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-            // llama-3.3-70b: stable free model, clean JSON output, no thinking tokens
-            model: "meta-llama/llama-3.3-70b-instruct:free",
-            messages: [{ role: "user", content: buildPrompt(text) }],
-            temperature: 0.1,
-            max_tokens: 1024,
-        }),
-    });
-
-    const body = await res.json().catch(() => ({}));
-    console.log(`[autofill] OpenRouter ${res.status}:`, body);
-
-    if (!res.ok) {
-        const msg = body?.error?.message ?? body?.error?.metadata?.raw ?? `OpenRouter error ${res.status}`;
-        const kind = res.status === 429 ? classify429(body) : "error";
-        throw Object.assign(new Error(msg), { is429: res.status === 429, kind });
-    }
-    return parseJSON(body.choices?.[0]?.message?.content ?? "");
-}
-
-async function fetchFromGemini(text, apiKey) {
-    // gemini-2.0-flash-lite: 30 RPM / 1500 RPD free tier
-    const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: buildPrompt(text) }] }],
-                generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
-            }),
+    // labelMap: label-on-one-line / value-on-next pattern + inline "Label: Value"
+    const labelMap = {};
+    const KNOWN_LABELS = [
+        "location","employment type","job type","location type","work type",
+        "work location","workplace","department","team","compensation","salary",
+        "pay","rate","compensation range","company","organization","industry","sector",
+    ];
+    for (let i = 0; i < lines.length - 1; i++) {
+        const key = lines[i].toLowerCase().replace(/[*_:#]/g, "").trim();
+        if (KNOWN_LABELS.some(l => key === l || key.startsWith(l))) {
+            labelMap[key] = lines[i + 1];
         }
-    );
-
-    const body = await res.json().catch(() => ({}));
-    console.log(`[autofill] Gemini ${res.status}:`, body);
-
-    if (!res.ok) {
-        const msg = body?.error?.message ?? `Gemini error ${res.status}`;
-        const kind = res.status === 429 ? classify429(body) : "error";
-        throw Object.assign(new Error(msg), { is429: res.status === 429, kind });
     }
-    return parseJSON(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
-}
-
-// callLLM - tries both providers, falls back automatically on 429
-// Dev: calls providers directly (IS_DEV=true), tries Gemini then OpenRouter
-// Prod: routes through /api/autofill which handles fallback server-side
-async function callLLM(text, allKeys) {
-    if (IS_DEV) {
-        const orKey     = allKeys?.openrouter ?? "";
-        const geminiKey = allKeys?.gemini ?? "";
-
-        // try Gemini first in dev
-        if (geminiKey) {
-            try {
-                const fields = await fetchFromGemini(text, geminiKey);
-                console.log("[autofill] fields from Gemini:", fields);
-                return fields;
-            } catch (err) {
-                if (!err.is429) throw err;
-                console.warn(`[autofill] Gemini 429 (${err.kind}) — trying OpenRouter`);
-            }
+    for (const line of lines) {
+        const m = line.match(/^\*{0,2}([A-Za-z ]{2,30})\*{0,2}\s*[:\-–]\s*(.+)/);
+        if (m) {
+            const key = m[1].toLowerCase().trim();
+            if (!labelMap[key]) labelMap[key] = m[2].replace(/\*+/g, "").trim();
         }
-
-        if (orKey) {
-            try {
-                const fields = await fetchFromOpenRouter(text, orKey);
-                console.log("[autofill] fields from OpenRouter:", fields);
-                return fields;
-            } catch (err) {
-                if (!err.is429) throw err;
-                console.warn(`[autofill] OpenRouter 429 (${err.kind}) — both exhausted`);
-            }
-        }
-
-        // both failed message
-        throw new Error(
-            "Both AI providers are unavailable right now (quota limits)."
-        );
     }
 
-    // prod: send both keys over HTTPS (npt logged server-side) - server tries OpenRouter first, falls back to Gemini
-    const res = await fetch("/api/autofill", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            mode: "extract",
-            text,
-            userOrKey:     allKeys?.openrouter ?? "",
-            userGeminiKey: allKeys?.gemini     ?? "",
-        }),
-    });
-    const data = await res.json().catch(() => { throw new Error("Server returned an unreadable response."); });
-    if (!res.ok) throw new Error(data?.error ?? `Server error ${res.status}`);
-    if (!data.fields) throw new Error("Unexpected response from server. Try again.");
+    // company
+    let company = labelMap["company"] || labelMap["organization"] || "";
+    if (!company) {
+        const m = text.match(/\bjobs?\s+at\s+([A-Z][A-Za-z0-9\s&.,'-]{1,40}?)(?:\s*[|\-–]|\n|$)/i)
+            ?? text.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'-]{1,40}?)\s*(?:is|are|we|–|-|\||\n)/i);
+        if (m?.[1]) company = m[1].trim();
+    }
 
-    console.log("[autofill] fields from server:", data.fields);
-    return data.fields;
-}
+    // location
+    const location = (labelMap["location"] || labelMap["work location"] || "")
+        .replace(/\b(remote|hybrid|on-?site|flexible)\b/gi, "")
+        .replace(/\s+/g, " ").trim();
 
-function buildPrompt(text) {
-    return `You are a job listing parser. Extract fields from the job posting below.
-Return ONLY valid JSON with these exact keys (empty string if unknown):
-company, role, location, workMode, jobType, industry, salary, description,
-requirements (array, only include values from this list: Resume / CV, Cover Letter, Portfolio, References, Writing Sample, Work Sample, Assessment / Test, Transcript, Background Check, Video Introduction, LinkedIn Profile, GitHub Profile, Personal Website),
-tags (array of 3-5 short lowercase keywords).
-workMode must be one of: Remote, Hybrid, On-site, Flexible, or empty string.
-jobType must be one of: Full-time, Part-time, Contract, Freelance, Internship, Temporary, Volunteer, or empty string.
-Job posting:
----
-${text}
----
-JSON only. No markdown fences. No explanation.`;
-}
+    // workMode
+    const ltRaw = (labelMap["location type"] || labelMap["workplace"] || labelMap["work type"] || "").toLowerCase();
+    let workMode = "";
+    if (/remote/i.test(ltRaw) && /on.?site|office|hybrid/i.test(ltRaw)) workMode = "Hybrid";
+    else if (/remote/i.test(ltRaw)) workMode = "Remote";
+    else if (/hybrid/i.test(ltRaw)) workMode = "Hybrid";
+    else if (/on.?site|in.?office/i.test(ltRaw)) workMode = "On-site";
+    else if (/flexible/i.test(ltRaw)) workMode = "Flexible";
+    if (!workMode) {
+        if (/\bfully[- ]remote\b|\b100%\s*remote\b/i.test(text)) workMode = "Remote";
+        else if (/\bremote\b/i.test(text) && /\boffice\b|\bon[- ]?site\b/i.test(text)) workMode = "Hybrid";
+        else if (/\bremote\b/i.test(text)) workMode = "Remote";
+        else if (/\bhybrid\b/i.test(text)) workMode = "Hybrid";
+        else if (/\bon[- ]?site\b|\bin[- ]?office\b/i.test(text)) workMode = "On-site";
+        else if (/\bflexible\s+(?:work|location|hours)\b/i.test(text)) workMode = "Flexible";
+    }
 
-// no-key local fallback
-// Only attempts fields that regex is reliably good at.
-// Intentionally leaves company/role/industry blank rather than guessing badly —
-// a wrong autofilled value is worse than an empty field the user fills themselves.
-// When an API key is present, the LLM path handles all of this with far higher quality.
-function extractFromPaste(text) {
-    const salaryMatch = text.match(
-        /[\$£€]\s*[\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?\s*[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i
-    );
+    // jobType
+    const jtRaw = (labelMap["employment type"] || labelMap["job type"] || labelMap["work type"] || "").toLowerCase();
+    let jobType = "";
+    if (/full.?time/i.test(jtRaw)) jobType = "Full-time";
+    else if (/part.?time/i.test(jtRaw)) jobType = "Part-time";
+    else if (/contract/i.test(jtRaw)) jobType = "Contract";
+    else if (/freelance/i.test(jtRaw)) jobType = "Freelance";
+    else if (/internship|intern\b/i.test(jtRaw)) jobType = "Internship";
+    else if (/temporary|temp\b/i.test(jtRaw)) jobType = "Temporary";
+    else if (/volunteer/i.test(jtRaw)) jobType = "Volunteer";
+    if (!jobType) {
+        if (/\bfull[.\s-]?time\b/i.test(text)) jobType = "Full-time";
+        else if (/\bpart[.\s-]?time\b/i.test(text)) jobType = "Part-time";
+        else if (/\bcontract\b/i.test(text)) jobType = "Contract";
+        else if (/\bfreelance\b/i.test(text)) jobType = "Freelance";
+        else if (/\binternship\b|\bintern\b/i.test(text)) jobType = "Internship";
+    }
 
-    // location: explicit label first, then city+state pattern as fallback
-    const locationMatch =
-        text.match(/(?:^|\n)\s*(?:Location|Based in|Office location|Location:|City)[:\s–-]+([^\n]{3,60})/im) ??
-        text.match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?,\s*[A-Z]{2})\b/);
+    // salary
+    const salaryRaw = labelMap["compensation"] || labelMap["salary"] || labelMap["pay"] || labelMap["rate"] || "";
+    const salary = salaryRaw
+        ? salaryRaw.replace(/\s*•\s*offers?\s+equity/gi, "").replace(/\s*•\s*bonus/gi, "").trim()
+        : (text.match(/[\$£€]\s*[\d,]+[kK]?\s*(?:[-–—to]+\s*[\$£€]?\s*[\d,]+[kK]?)?(?:\s*(?:per|\/)\s*(?:year|yr|hour|hr|annum))?/i)?.[0]?.trim() ?? "");
 
-    const workMode =
-        /\bfully[- ]remote\b|\b100%\s*remote\b|\bremote[- ]first\b/i.test(text) ? "Remote" :
-        /\bremote\b/i.test(text) && /\boffice\b|\bon[- ]?site\b/i.test(text)    ? "Hybrid" :
-        /\bremote\b/i.test(text)                                                 ? "Remote" :
-        /\bhybrid\b/i.test(text)                                                 ? "Hybrid" :
-        /\bon[- ]?site\b|\bin[- ]?office\b|\bin the office\b/i.test(text)        ? "On-site" :
-        /\bflexible\s+(?:work|location|hours|arrangement)\b/i.test(text)         ? "Flexible" : "";
+    // industry
+    const INDUSTRY_LIST = [
+        "Technology","Healthcare","Finance","Education","Retail","Manufacturing",
+        "Media","Government","Nonprofit","Real Estate","Legal","Marketing",
+        "Consulting","Hospitality","Transportation","Energy","Pharmaceuticals",
+    ];
+    let industry = labelMap["industry"] || labelMap["sector"] || "";
+    if (!industry) {
+        for (const ind of INDUSTRY_LIST) {
+            if (new RegExp(`\\b${ind}\\b`, "i").test(text)) { industry = ind; break; }
+        }
+        if (!industry) {
+            if (/\bhealth\b|\bmedical\b|\bclinic\b|\bpsych/i.test(text)) industry = "Healthcare";
+            else if (/\bfintech\b|\bbank\b|\bfinance\b/i.test(text)) industry = "Finance";
+            else if (/\bedtech\b|\beducation\b/i.test(text)) industry = "Education";
+        }
+    }
 
-    const jobType =
-        /\bfull[.\s-]?time\b/i.test(text)                  ? "Full-time" :
-        /\bpart[.\s-]?time\b/i.test(text)                  ? "Part-time" :
-        /\bcontract(?:\s+role|\s+position)?\b/i.test(text) ? "Contract"  :
-        /\bfreelance\b/i.test(text)                        ? "Freelance" :
-        /\binternship\b|\bintern\b/i.test(text)            ? "Internship":
-        /\btemporary\b|\btemp\b/i.test(text)               ? "Temporary" :
-        /\bvolunteer\b/i.test(text)                        ? "Volunteer" : "";
-
+    // requirements
     const reqMap = {
         "Resume / CV":       /\bresume\b|\bcv\b|\bcurriculum vitae\b/i,
         "Cover Letter":      /\bcover letter\b/i,
@@ -252,20 +176,60 @@ function extractFromPaste(text) {
         "LinkedIn Profile":  /\blinkedin\b/i,
         "GitHub Profile":    /\bgithub\b/i,
         "Personal Website":  /\bpersonal\s+(?:website|site)\b/i,
+        "Video Introduction":/\bvideo\s+(?:intro|introduction|cover)\b/i,
     };
+    const requirements = Object.entries(reqMap)
+        .filter(([, re]) => re.test(text))
+        .map(([l]) => l);
 
-    return {
-        company:      "",   // too error-prone without LLM - left blank intentionally
-        role:         "",   // too error-prone without LLM - left blank intentionally
-        location:     locationMatch?.[1]?.trim() ?? "",
-        workMode,
-        jobType,
-        industry:     "",
-        salary:       salaryMatch?.[0]?.trim().replace(/\s+/g, " ") ?? "",
-        description:  text.slice(0, 2000),
-        requirements: Object.entries(reqMap).filter(([, re]) => re.test(text)).map(([l]) => l),
-        tags:         [],
-    };
+    // tags
+    const tags = [...new Set([
+        workMode ? workMode.toLowerCase().replace("-", "") : null,
+        industry ? industry.toLowerCase() : null,
+        /\bstartup\b|\bseries [a-e]\b/i.test(text) ? "startup" : null,
+        /\bequity\b/i.test(text) ? "equity" : null,
+        /\bai\b|\bmachine learning\b|\bllm\b/i.test(text) ? "ai" : null,
+    ].filter(Boolean))].slice(0, 5);
+
+    // description: body text starting from overview/responsibilities sections
+    const DROP_LINES = [/^apply\s/i, /^powered by/i, /^privacy policy/i, /^share\b/i, /^back\b/i];
+    const descLines = lines.filter(l => !DROP_LINES.some(re => re.test(l)));
+    const descStart = descLines.findIndex(l =>
+        /overview|about\s+(the\s+)?(role|job|position|company|us|team)|responsibilities|what you|why you|we'?re\s+looking/i.test(l)
+    );
+    const description = descLines.slice(descStart >= 0 ? descStart : 0).join("\n").slice(0, 2000).trim();
+
+    return { company, role, location, workMode, jobType, industry, salary, description, requirements, tags };
+}
+
+// extract fields from text
+// dev: parses client-side (no network calls needed beyond Jina fetch)
+// prod: calls /api/autofill which runs the same parser server-side, optionally enhanced by LLM if user has a key
+async function extractFields(text, allKeys) {
+    if (IS_DEV) {
+        // run parser directly in browser - zero API calls, zero quota
+        const fields = parseJobPosting(text);
+        console.log("[autofill] parsed fields (dev):", fields);
+        return fields;
+    }
+
+    // prod: server handles parsing + optional LLM enhancement
+    const res = await fetch("/api/autofill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            mode: "extract",
+            text,
+            userOrKey:     allKeys?.openrouter ?? "",
+            userGeminiKey: allKeys?.gemini     ?? "",
+        }),
+    });
+    const data = await res.json().catch(() => { throw new Error("Server returned an unreadable response."); });
+    if (!res.ok) throw new Error(data?.error ?? `Server error ${res.status}`);
+    if (!data.fields) throw new Error("No fields returned from server.");
+
+    console.log(`[autofill] fields from server (${data.source}):`, data.fields);
+    return data.fields;
 }
 
 
@@ -330,7 +294,7 @@ export default function JobModal({ modal, columns, onClose, onAdd, onUpdate, onD
             ref={overlayRef}
             role="dialog"
             aria-modal="true"
-            aria-label={isAdd ? "Add job" : isEdit ? `Edit job — ${job?.company}` : `${job?.company} — ${job?.role}`}
+            aria-label={isAdd ? "Add job" : isEdit ? `Edit job - ${job?.company}` : `${job?.company} - ${job?.role}`}
             onClick={e => { if (e.target === e.currentTarget) onClose(); }}
             style={{
                 position: "fixed", inset: 0,
@@ -409,7 +373,7 @@ function ModalHeader({ mode, job, col, onClose, onEdit, onDelete }) {
                 )}
                 <div style={{ minWidth: 0 }}>
                     <h2 style={{ margin: 0, fontWeight: 700, fontSize: 15, color: "var(--text-primary)" }} className="truncate">
-                        {mode === "add" ? "Add a job" : mode === "edit" ? `Editing — ${job?.company}` : job?.company}
+                        {mode === "add" ? "Add a job" : mode === "edit" ? `Editing - ${job?.company}` : job?.company}
                     </h2>
                     {isView && job?.role && (
                         <p style={{ margin: 0, fontSize: 13, color: "var(--text-secondary)" }}>{job.role}</p>
@@ -560,7 +524,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
     const [autofillError, setAutofillError]   = useState("");
     const [autofillSuccess, setAutofillSuccess] = useState(false);
 
-    // read API keys from localStorage (Settings)
+    // read API keys (optional) from localStorage (Settings) - parser works without them
     const openrouterKey  = localStorage.getItem("sprout_or_key") ?? "";
     const geminiKey      = localStorage.getItem("sprout_gemini_key") ?? "";
     const hasKey         = !!(openrouterKey || geminiKey);
@@ -595,30 +559,19 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
         setAutofillSuccess(false);
 
         try {
-            let extracted;
-            // both keys passed - server (or dev fallback) decides which to use
             const allKeys = { openrouter: openrouterKey, gemini: geminiKey };
-            const hasAnyKey = !!(openrouterKey || geminiKey);
+            let extracted;
 
             if (autofillMode === "paste") {
                 // PASTE mode
                 if (!autofillText.trim()) throw new Error("Please paste the job description first.");
-                if (hasAnyKey) {
-                    extracted = await callLLM(cleanPastedText(autofillText), allKeys);
-                } else {
-                    // no key - local heuristic. Only fills what regex is reliable for
-                    // (work mode, job type, salary, requirements, description).
-                    // Company/role intentionally left blank to avoid bad guesses.
-                    extracted = extractFromPaste(autofillText);
-                }
+                extracted = await extractFields(cleanText(autofillText), allKeys);
             } else {
-                // URL mode - needs a key
                 if (!autofillUrl.trim()) throw new Error("Please enter a URL.");
-                if (!hasAnyKey) throw new Error("An API key is needed to autofill from a URL. Add an OpenRouter or Gemini key in Settings, or paste the description instead.");
                 const pageText = await fetchUrlViaJina(autofillUrl.trim());
                 // guard against Jina returning empty content (login walls, Workday, Greenhouse, etc.)
-                if (!pageText?.trim()) throw new Error("Couldn't read that page — it may be behind a login or block scrapers. Try pasting the description instead.");
-                extracted = await callLLM(pageText, allKeys);
+                if (!pageText?.trim()) throw new Error("Couldn't read that page - it may be behind a login or block scrapers. Try pasting the description instead.");
+                extracted = await extractFields(cleanText(pageText), allKeys);
             }
 
             // DEBUG
@@ -682,9 +635,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                             style={inputStyle()}
                         />
                         <p style={{ margin: "5px 0 0", fontSize: 12, color: "var(--text-tertiary)" }}>
-                            {hasKey
-                                ? "Fetches the page via Jina Reader, then extracts fields with AI."
-                                : "Requires an API key — add one in Settings, or paste the description instead."}
+                            Fetches the page via Jina Reader and extracts fields automatically.
                         </p>
                     </div>
                 ) : (
@@ -699,36 +650,34 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                             rows={4}
                         />
                         <p style={{ margin: "5px 0 0", fontSize: 12, color: "var(--text-tertiary)" }}>
-                            {hasKey
-                                ? "AI will extract all fields. Boilerplate is stripped automatically."
-                                : "No key needed — Sprout fills what it can locally. Add a free OpenRouter key in Settings for full extraction."}
+                            Sprout extracts fields automatically.
+                            {hasKey ? " AI key active for enhanced extraction." : ""}
                         </p>
                     </div>
                 )}
 
                 {/* KEY STATUS INDICATOR - key management in Settings */}
-                <div style={{
-                    display: "flex", alignItems: "center", justifyContent: "space-between",
-                    margin: "10px 0",
-                    padding: "8px 12px",
-                    borderRadius: 8,
-                    background: "var(--bg-subtle)",
-                    border: "1px solid var(--border-subtle)",
-                    fontSize: 12,
-                }}>
-                    <span style={{ color: hasKey ? "var(--success)" : "var(--text-tertiary)", fontWeight: hasKey ? 600 : 400 }}>
-                        {hasKey
-                            ? `✓ ${activeKeyLabel} key active`
-                            : "⚠ No key — partial fill only (work mode, job type, salary)"}
-                    </span>
-                    <a
-                        href="#settings"
-                        onClick={e => { e.preventDefault(); document.querySelector('[aria-label="Open settings"]')?.click(); }}
-                        style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}
-                    >
-                        Manage keys →
-                    </a>
-                </div>
+                    <div style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        margin: "10px 0",
+                        padding: "8px 12px",
+                        borderRadius: 8,
+                        background: "var(--bg-subtle)",
+                        border: "1px solid var(--border-subtle)",
+                        fontSize: 12,
+                    }}>
+                        <span style={{ color: "var(--success)", fontWeight: 600 }}>
+                            ✓ {activeKeyLabel} key active - enhanced extraction enabled
+                        </span>
+                        <a
+                            href="#settings"
+                            onClick={e => { e.preventDefault(); document.querySelector('[aria-label="Open settings"]')?.click(); }}
+                            style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}
+                        >
+                            Manage →
+                        </a>
+                    </div>
+                )
 
                 {/* AUTOFILL BUTTON */}
                 <button
@@ -753,7 +702,7 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                 )}
                 {autofillSuccess && (
                     <p role="status" aria-live="polite" style={{ margin: "8px 0 0", fontSize: 13, color: "var(--success)", fontWeight: 500 }}>
-                        ✓ Fields filled — review everything before saving.
+                        ✓ Fields filled - review everything before saving.
                     </p>
                 )}
             </section>
