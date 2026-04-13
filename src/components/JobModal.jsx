@@ -597,8 +597,6 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
         // AUTOFILL
         <div style={{ display: "flex", flexDirection: "column", gap: 18, fontFamily: "var(--font-sans)", fontSize: 14 }}>
             <section aria-labelledby="autofill-heading">
-                <p id="autofill-heading" style={{ ...labelStyle, marginBottom: 10 }}>Autofill from job listing</p>
-
                 {/* AUTOFILL MODE */}
                 <div role="group" aria-label="Autofill mode" style={{ display: "flex", justifyContent: "center", gap: 6, marginBottom: 10 }}>
                     {[{ id: "url", label: "From URL" }, { id: "paste", label: "Paste description" }].map(m => (
@@ -634,9 +632,9 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                             onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleAutofill(); } }}
                             style={inputStyle()}
                         />
-                        <p style={{ margin: "5px 0 0", fontSize: 12, color: "var(--text-tertiary)" }}>
+                        {/* <p style={{ margin: "5px 0 0", fontSize: 12, color: "var(--text-tertiary)" }}>
                             Fetches the page via Jina Reader and extracts fields automatically.
-                        </p>
+                        </p> */}
                     </div>
                 ) : (
                     <div>
@@ -674,10 +672,9 @@ function FormBody({ initial, columns, onSubmit, onCancel, isAdd }) {
                             onClick={e => { e.preventDefault(); document.querySelector('[aria-label="Open settings"]')?.click(); }}
                             style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}
                         >
-                            Manage →
+                            Settings →
                         </a>
                     </div>
-                )
 
                 {/* AUTOFILL BUTTON */}
                 <button
